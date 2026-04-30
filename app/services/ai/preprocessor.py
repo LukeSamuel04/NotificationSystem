@@ -1,9 +1,8 @@
 import re
 
-
 def clean_email_text(subject: str, content: str) -> str:
     """
-    Email cleaning function
+    Email cleaning function: 负责将生肉文本清洗为纯净字符串
     """
     # 1. Combine the topic with the content.
     raw_text = f"{subject} {content}"

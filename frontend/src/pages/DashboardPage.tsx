@@ -1,16 +1,36 @@
+// src/pages/DashboardPage.tsx
 import { useState, useEffect, useMemo } from 'react';
-import { AlertTriangle, CheckCircle2, Inbox, Clock, User, Tag, ChevronDown, ChevronUp, Search} from 'lucide-react';
-import { notificationApi } from '../services/api';
+import { AlertTriangle, CheckCircle2, Inbox, Clock, User, Tag, ChevronDown, ChevronUp, Search, Sparkles } from 'lucide-react';
+import { notificationApi } from '../api/notification';
+// 【核心修复】：使用 AppNotification 避开浏览器原生保留字
+import type { AppNotification } from '../types';
 
-interface NotificationData {
-  id: number;
-  sender: string;
-  subject: string;
-  raw_content: string;
-  priority_score: number;
-  category: string;
-  received_at?: string;
-}
+// 💡 【小提示】：因为你的后端现在已经有了“大厂级”的 html_cleaner.py，
+// 这里其实收到的已经是极度干净的 Markdown/纯文本了。
+// 这个函数现在相当于只做个最终的保险（清理首尾空格和极端多余的换行），性能极其丝滑。
+const parseHtmlToPlainText = (htmlString: string) => {
+  if (!htmlString) return "";
+
+  // 1. 物理铲除所有的 CSS、脚本和头部信息 (对现在的 cleaned_content 来说基本是空跑)
+  let html = htmlString.replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, '');
+
+  // 2. 把所有负责排版的块级标签，一律打平成一个简单的换行符 \n
+  html = html.replace(/<\/?(div|p|br|tr|td|table|tbody|h[1-6]|li)[^>]*>/gi, '\n');
+
+  // 3. 让 DOMParser 仅仅负责解码
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  let text = doc.body.textContent || "";
+
+  // 4. 把一切稀奇古怪的隐藏空白全部拍扁成普通空格
+  text = text.replace(/[\u00A0\u2007\u200B-\u200D\uFEFF\u2028\u2029]/g, ' ');
+
+  // 5. 💣 终极碎纸机：打散 -> 脱水 -> 过滤 -> 重组
+  return text
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .join('\n\n');
+};
 
 // 硬编码分类列表
 const CATEGORIES = [
@@ -23,18 +43,20 @@ const CATEGORIES = [
 ];
 
 export default function DashboardPage() {
-  const [history, setHistory] = useState<NotificationData[]>([]);
+  const [history, setHistory] = useState<AppNotification[]>([]);
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
 
-  // 【新增状态】：搜索词和选中的分类
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
 
   const fetchHistory = async () => {
     try {
       const res = await notificationApi.getNotifications();
-      // 保持优先级排序逻辑
-      const sortedData = (res.data || []).sort((a: NotificationData, b: NotificationData) => b.priority_score - a.priority_score);
+      const sortedData = (res || []).sort((a: AppNotification, b: AppNotification) => {
+        const scoreA = a.priority_score ?? -1;
+        const scoreB = b.priority_score ?? -1;
+        return scoreB - scoreA;
+      });
       setHistory(sortedData);
     } catch (err) {
       console.error("Failed to fetch notifications:", err);
@@ -45,16 +67,14 @@ export default function DashboardPage() {
     fetchHistory().catch(console.error);
   }, []);
 
-  // 【核心逻辑】：前端过滤算法
-  // 使用 useMemo 确保只有当 history/search/category 变化时才重新计算，优化性能
   const filteredData = useMemo(() => {
     return history.filter(item => {
-      const matchesSearch =
-        item.subject.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        item.sender.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        item.raw_content.toLowerCase().includes(searchQuery.toLowerCase());
+      // 💥 【替换点 1】：搜索的时候，读取 item.cleaned_content
+      const textToSearch = `${item.subject} ${item.sender} ${item.cleaned_content}`.toLowerCase();
+      const matchesSearch = textToSearch.includes(searchQuery.toLowerCase());
 
-      const matchesCategory = selectedCategory === 'all' || item.category === selectedCategory;
+      const itemCategory = item.category || 'uncategorized';
+      const matchesCategory = selectedCategory === 'all' || itemCategory === selectedCategory;
 
       return matchesSearch && matchesCategory;
     });
@@ -79,7 +99,8 @@ export default function DashboardPage() {
     });
   };
 
-  const getPriorityStyle = (score: number) => {
+  const getPriorityStyle = (score?: number | null) => {
+    if (score === null || score === undefined) return { color: '#94a3b8', label: 'AI Pending', bg: '#f8fafc' };
     if (score >= 8) return { color: '#ef4444', label: 'Urgent', bg: '#fef2f2' };
     if (score >= 5) return { color: '#f59e0b', label: 'Normal', bg: '#fffbeb' };
     return { color: '#10b981', label: 'Lower', bg: '#ecfdf5' };
@@ -87,10 +108,9 @@ export default function DashboardPage() {
 
   return (
     <div style={{ height: '100%', overflowY: 'auto', padding: '20px', boxSizing: 'border-box' }}>
-
       <section className="panel-card" style={{ margin: 0, padding: '20px' }}>
 
-        {/* 1. 顶部标题区 */}
+        {/* 顶部标题区 */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
           <h2 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '10px', color: '#0f172a' }}>
             <Inbox size={28} color="#3b82f6" /> Pending Tasks
@@ -100,10 +120,8 @@ export default function DashboardPage() {
           </span>
         </div>
 
-        {/* 2. 【新增】工具栏：搜索 + 分类过滤 */}
+        {/* 工具栏：搜索 + 分类过滤 */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginBottom: '25px', paddingBottom: '20px', borderBottom: '1px solid #f1f5f9' }}>
-
-          {/* 搜索框 */}
           <div style={{ position: 'relative', width: '100%' }}>
             <Search size={18} color="#94a3b8" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)' }} />
             <input
@@ -119,7 +137,6 @@ export default function DashboardPage() {
             />
           </div>
 
-          {/* 分类切换按钮 (Pills) */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
             {CATEGORIES.map(cat => (
               <button
@@ -139,7 +156,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* 3. 任务列表区 */}
+        {/* 任务列表区 */}
         {filteredData.length === 0 ? (
           <div style={{ textAlign: 'center', marginTop: '60px', color: '#94a3b8', paddingBottom: '60px' }}>
             <AlertTriangle size={48} style={{ marginBottom: '15px', opacity: 0.3, margin: '0 auto' }} />
@@ -157,8 +174,11 @@ export default function DashboardPage() {
             {filteredData.map((item) => {
               const style = getPriorityStyle(item.priority_score);
               const isExpanded = expandedIds.has(item.id);
-              const rawText = item.raw_content || "";
-              const isLongContent = rawText.length > 150 || (rawText.match(/\n/g) || []).length >= 3;
+
+              // 💥 【替换点 2】：渲染的时候，读取 item.cleaned_content
+              const textContent = parseHtmlToPlainText(item.cleaned_content || "");
+
+              const isLongContent = textContent.length > 150 || (textContent.match(/\n/g) || []).length >= 3;
 
               return (
                 <div key={item.id} style={{
@@ -180,10 +200,10 @@ export default function DashboardPage() {
                       </span>
                       <div style={{ display: 'flex', flexWrap: 'nowrap', gap: '8px', overflow: 'hidden' }}>
                         <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '4px', backgroundColor: 'white', color: style.color, border: `1px solid ${style.color}`, fontWeight: 'bold', whiteSpace: 'nowrap' }}>
-                          {style.label} {item.priority_score.toFixed(1)}
+                          {style.label} {item.priority_score != null ? item.priority_score.toFixed(1) : ''}
                         </span>
                         <span style={{ fontSize: '11px', padding: '2px 8px', borderRadius: '4px', backgroundColor: '#e2e8f0', color: '#475569', display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
-                          <Tag size={12} style={{ flexShrink: 0 }} /> {item.category}
+                          <Tag size={12} style={{ flexShrink: 0 }} /> {item.category || 'Uncategorized'}
                         </span>
                       </div>
                     </div>
@@ -197,6 +217,20 @@ export default function DashboardPage() {
                       />
                     </div>
                   </div>
+
+                  {/* AI Summary 模块 */}
+                  {item.summary && (
+                    <div style={{
+                      backgroundColor: 'rgba(255, 255, 255, 0.6)', border: '1px solid #e2e8f0',
+                      borderRadius: '8px', padding: '10px 12px', marginBottom: '12px',
+                      display: 'flex', gap: '8px', alignItems: 'flex-start'
+                    }}>
+                      <Sparkles size={16} color="#8b5cf6" style={{ flexShrink: 0, marginTop: '2px' }} />
+                      <span style={{ fontSize: '13px', color: '#4c1d95', fontWeight: 500, lineHeight: 1.5 }}>
+                        {item.summary}
+                      </span>
+                    </div>
+                  )}
 
                   <div style={{
                     fontSize: '13px', color: '#64748b', marginBottom: '12px', display: 'flex', gap: '15px',
@@ -219,7 +253,7 @@ export default function DashboardPage() {
                     WebkitBoxOrient: 'vertical', overflow: 'hidden', whiteSpace: 'pre-wrap',
                     height: isExpanded || !isLongContent ? 'auto' : '4.8em'
                   }}>
-                    {rawText}
+                    {textContent}
                   </div>
 
                   {isLongContent && (

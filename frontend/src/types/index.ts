@@ -1,3 +1,7 @@
+// src/types/index.ts
+
+export * from './account';
+export * from './notification';
 export interface Notification {
   id: number;
   sender: string;
