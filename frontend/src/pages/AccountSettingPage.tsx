@@ -1,21 +1,12 @@
 // src/pages/AccountSettingPage.tsx
-import React, { useState, useEffect} from 'react';
+import React, { useState, useEffect } from 'react';
 import { apiClient } from '../services/http';
-import { Plus, Mail, Camera, MessageSquare, Trash2, Power, Settings, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
-import type { AccountResponse} from '../types/account';
-
-// 扩展前端本地状态，增加倒计时和验证状态
-interface LocalAccount extends AccountResponse {
-  countdown: number;
-  isVerifying: boolean;
-  verifyFailed: boolean;
-}
-
-// 倒计时周期（秒）
-const VERIFY_INTERVAL = 60;
+import { Plus, Mail, Camera, MessageSquare, Trash2, Power, Settings, Loader2, AlertCircle } from 'lucide-react';
+import type { AccountResponse } from '../types/account';
 
 const AccountSettingPage: React.FC = () => {
-  const [accounts, setAccounts] = useState<LocalAccount[]>([]);
+  // 💥 改动1：剔除 LocalAccount，直接使用后端的 AccountResponse
+  const [accounts, setAccounts] = useState<AccountResponse[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
@@ -24,21 +15,14 @@ const AccountSettingPage: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
 
-  // 表单状态增加了 is_active 字段用于启停开关
   const defaultForm = { platform: 'email' as const, username: '', password: '', is_active: true, config: { host: '' } };
   const [formData, setFormData] = useState<any>(defaultForm);
 
-  // 拉取账号列表并初始化本地状态
+  // 💥 改动2：纯粹的数据拉取，不再强行注入验证状态
   const fetchAccounts = async () => {
     try {
       const res = await apiClient.get('/api/accounts');
-      const enhancedAccounts = res.data.map((acc: AccountResponse) => ({
-        ...acc,
-        countdown: VERIFY_INTERVAL,
-        isVerifying: false,
-        verifyFailed: false
-      }));
-      setAccounts(enhancedAccounts);
+      setAccounts(res.data);
     } catch (err) {
       console.error("加载账号失败", err);
     } finally {
@@ -50,49 +34,6 @@ const AccountSettingPage: React.FC = () => {
     fetchAccounts();
   }, []);
 
-  // --------------------------------------------------
-  // 💥 核心逻辑：全局倒计时与自动验证心跳
-  // --------------------------------------------------
-  const triggerVerify = async (id: number) => {
-    try {
-      // 调用后端的专门验证接口 (或者复用获取单条记录来触发验证，这里假设有一个 verify 接口)
-      await apiClient.post(`/api/accounts/${id}/verify`);
-
-      // 验证成功：重置状态
-      setAccounts(prev => prev.map(acc =>
-        acc.id === id ? { ...acc, isVerifying: false, verifyFailed: false, countdown: VERIFY_INTERVAL } : acc
-      ));
-    } catch (err) {
-      // 验证失败：标记为失效
-      setAccounts(prev => prev.map(acc =>
-        acc.id === id ? { ...acc, isVerifying: false, verifyFailed: true, countdown: VERIFY_INTERVAL } : acc
-      ));
-    }
-  };
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setAccounts(prev => {
-        const next = [...prev];
-        next.forEach(acc => {
-          // 只有在“已启用”、且“未在验证中”、且“未失效”的状态下才倒计时
-          if (acc.is_active && !acc.isVerifying && !acc.verifyFailed) {
-            acc.countdown -= 1;
-            if (acc.countdown <= 0) {
-              acc.isVerifying = true;
-              acc.countdown = VERIFY_INTERVAL; // 提早重置倒计时
-              // 触发异步验证 (脱离本次渲染循环)
-              setTimeout(() => triggerVerify(acc.id), 0);
-            }
-          }
-        });
-        return next;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-  // --------------------------------------------------
-
   const handleOpenAdd = () => {
     setEditingId(null);
     setFormData(defaultForm);
@@ -100,7 +41,7 @@ const AccountSettingPage: React.FC = () => {
     setIsModalOpen(true);
   };
 
-  const handleOpenEdit = (account: LocalAccount) => {
+  const handleOpenEdit = (account: AccountResponse) => {
     setEditingId(account.id);
     setFormData({
       platform: account.platform,
@@ -123,9 +64,9 @@ const AccountSettingPage: React.FC = () => {
         await apiClient.post('/api/accounts', formData);
       }
       setIsModalOpen(false);
-      fetchAccounts(); // 保存成功后重新拉取
+      fetchAccounts();
     } catch (err: any) {
-      const backendError = err.response?.data?.detail || "配置验证失败，请检查账号或网络";
+      const backendError = err.response?.data?.detail || "保存失败，请检查账号配置或网络";
       setErrorMsg(backendError);
     } finally {
       setIsSaving(false);
@@ -157,7 +98,6 @@ const AccountSettingPage: React.FC = () => {
   return (
     <>
       <style>{`
-        /* ...之前的原有基础样式保持不变... */
         .account-page { min-height: 100vh; background-color: #f8fafc; padding: 40px 32px; font-family: system-ui, -apple-system, sans-serif; }
         .account-container { max-width: 1000px; margin: 0 auto; }
         .account-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px; }
@@ -178,12 +118,10 @@ const AccountSettingPage: React.FC = () => {
         .account-card:hover { box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
         .card-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
         .platform-icon { padding: 10px; border-radius: 8px; background-color: #f1f5f9; display: flex; align-items: center; justify-content: center; }
-        .status-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; }
         
-        /* 💥 新增/修改的状态标签样式 */
+        .status-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 99px; }
         .status-active { background-color: #dcfce7; color: #15803d; }
         .status-inactive { background-color: #f1f5f9; color: #475569; }
-        .status-verifying { background-color: #e0f2fe; color: #0369a1; }
         .status-error { background-color: #fef2f2; color: #b91c1c; }
 
         .account-username { margin: 0 0 4px 0; font-size: 18px; color: #1e293b; word-break: break-all; }
@@ -198,11 +136,11 @@ const AccountSettingPage: React.FC = () => {
         .form-group label { display: block; font-size: 14px; font-weight: 500; color: #334155; margin-bottom: 8px; }
         .form-control { width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; outline: none; box-sizing: border-box; transition: border-color 0.2s; }
         .form-control:focus { border-color: #4f46e5; }
+        .form-control:disabled { background-color: #f1f5f9; color: #94a3b8; cursor: not-allowed; }
         .modal-actions { display: flex; gap: 12px; margin-top: 32px; justify-content: flex-end; }
         .error-banner { background-color: #fef2f2; color: #b91c1c; padding: 12px; border-radius: 8px; font-size: 14px; margin-bottom: 20px; display: flex; align-items: flex-start; gap: 8px; border: 1px solid #fecaca; }
         .loader-container { display: flex; justify-content: center; padding: 80px 0; }
         
-        /* 💥 Toggle 开关样式 */
         .toggle-switch { width: 44px; height: 24px; border-radius: 99px; position: relative; cursor: pointer; transition: background-color 0.2s; border: none; }
         .toggle-switch-on { background-color: #10b981; }
         .toggle-switch-off { background-color: #cbd5e1; }
@@ -236,32 +174,19 @@ const AccountSettingPage: React.FC = () => {
                       {account.platform === 'whatsapp' && <MessageSquare color="#16a34a" size={24} />}
                     </div>
 
-                    {/* 💥 状态与倒计时显示区 */}
+                    {/* 💥 改动3：完全依赖后端的 is_active 和 is_valid 渲染状态 */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-
-                      {/* 仅在正常启用且未验证时显示倒计时 */}
-                      {account.is_active && !account.isVerifying && !account.verifyFailed && (
-                        <span style={{ fontSize: '12px', color: '#94a3b8', fontVariantNumeric: 'tabular-nums' }}>
-                          {account.countdown}s 后检测
-                        </span>
-                      )}
-
-                      {/* 动态渲染 Badge */}
-                      {account.isVerifying ? (
-                        <div className="status-badge status-verifying">
-                          <RefreshCw size={12} className="animate-spin" /> 验证中...
+                      {!account.is_active ? (
+                        <div className="status-badge status-inactive">
+                          <Power size={12} /> 已禁用
                         </div>
-                      ) : account.verifyFailed ? (
-                        <div className="status-badge status-error">
-                          <AlertCircle size={12} /> 已失效
-                        </div>
-                      ) : account.is_active ? (
+                      ) : account.is_valid ? (
                         <div className="status-badge status-active">
                           <Power size={12} /> 已启用
                         </div>
                       ) : (
-                        <div className="status-badge status-inactive">
-                          <Power size={12} /> 已禁用
+                        <div className="status-badge status-error">
+                          <AlertCircle size={12} /> 已失效
                         </div>
                       )}
                     </div>
@@ -294,7 +219,6 @@ const AccountSettingPage: React.FC = () => {
                 </div>
               )}
 
-              {/* 💥 新增：账号启停控制面板 */}
               <div className="form-group" style={{
                 display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 backgroundColor: '#f8fafc', padding: '12px 16px', borderRadius: '8px', border: '1px solid #e2e8f0'
@@ -351,9 +275,12 @@ const AccountSettingPage: React.FC = () => {
                 <div className="form-group">
                   <label>IMAP 服务器地址 (Host)</label>
                   <input
-                    type="text" className="form-control" placeholder="如: imap.qq.com"
+                    type="text"
+                    className="form-control"
+                    placeholder="如: imap.qq.com"
                     value={formData.config.host}
                     onChange={e => setFormData({...formData, config: { ...formData.config, host: e.target.value }})}
+                    disabled={!!editingId} // 💥 改动4：处于编辑状态时，禁用 host 修改
                   />
                 </div>
               )}
@@ -397,9 +324,10 @@ const AccountSettingPage: React.FC = () => {
                   </button>
                   <button className="btn btn-primary" onClick={handleSave} disabled={isSaving}>
                     {isSaving ? (
-                      <><Loader2 size={16} className="animate-spin" /> 验证中...</>
+                      <><Loader2 size={16} className="animate-spin" /> 保存中...</>
                     ) : (
-                      '保存并验证'
+                      // 💥 改动5：如果是关掉激活，文案直接显示“保存配置”，不再让人觉得在做验证
+                      formData.is_active ? '保存并启用' : '保存配置'
                     )}
                   </button>
                 </div>
@@ -415,8 +343,8 @@ const AccountSettingPage: React.FC = () => {
                 <AlertCircle size={48} />
               </div>
               <h2 style={{ fontSize: '20px', marginBottom: '12px' }}>确认删除此账号？</h2>
-              <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '24px' }}>
-                删除后，AI 将不再从该数据源获取消息。此操作无法撤销。
+              <p style={{ color: '#64748b', fontSize: '14px', margin: '0 0 24px 0' }}>
+                删除后，系统将彻底遗忘该账号。此操作无法撤销。
               </p>
               <div style={{ display: 'flex', gap: '12px' }}>
                 <button className="btn btn-secondary" style={{ flex: 1, justifyContent: 'center' }} onClick={() => setDeleteConfirmId(null)}>

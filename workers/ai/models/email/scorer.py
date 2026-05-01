@@ -1,4 +1,3 @@
-# app/services/ai/score.py
 from transformers import pipeline
 import os
 

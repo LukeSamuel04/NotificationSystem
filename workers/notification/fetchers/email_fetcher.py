@@ -1,12 +1,10 @@
-# workers/fetchers/email_fetcher.py
-
 import email
 from email.header import decode_header
 from email.message import Message
 from typing import List, Dict, Any
 
 import aioimaplib  # 原生异步 IMAP 引擎
-from workers.base import BaseFetcher
+from workers.notification.fetchers.base import BaseFetcher
 
 
 class EmailFetcher(BaseFetcher):

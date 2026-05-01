@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Union, Literal, Dict, Any
 from typing_extensions import Annotated
+from datetime import datetime
 
 # -----------------------------------
 # 0. 账号激活/停用快速配置端口
@@ -23,15 +24,26 @@ class InstagramConfig(BaseModel):
 class WhatsAppConfig(BaseModel):
     api_key: str
 
+# 🆕 为更新操作准备的配置模型 (所有字段设为 Optional)
+class EmailConfigUpdate(BaseModel):
+    host: Optional[str] = None
+    port: Optional[int] = None
+    secure: Optional[bool] = None
+
+class InstagramConfigUpdate(BaseModel):
+    proxy_url: Optional[str] = None
+    session_id: Optional[str] = None
+
+class WhatsAppConfigUpdate(BaseModel):
+    api_key: Optional[str] = None
 
 # -----------------------------------
-# 2. 派生各个平台的专属账号载荷
+# 2. 派生各个平台的专属账号载荷 (Create)
 # -----------------------------------
-# 💥 优化：把公共字段提取到父类，避免重复写 username, password, is_active
 class AccountCreateBase(BaseModel):
     username: str
     password: str
-    is_active: Optional[bool] = True  # 允许前端在创建/编辑时传递启停状态
+    is_active: Optional[bool] = True
 
 class EmailAccountCreate(AccountCreateBase):
     platform: Literal["email"]
@@ -46,23 +58,52 @@ class WhatsAppAccountCreate(AccountCreateBase):
     config: WhatsAppConfig
 
 # -----------------------------------
-# 3. 辨析联合类型 (分拣器)
+# 3. 💥 新增：更新载荷 (Update)
+# -----------------------------------
+# 用于修复 ImportError: cannot import name 'AccountUpdate'
+class AccountUpdateBase(BaseModel):
+    username: Optional[str] = None
+    password: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class EmailAccountUpdate(AccountUpdateBase):
+    platform: Literal["email"]
+    config: Optional[EmailConfigUpdate] = None
+
+class InstagramAccountUpdate(AccountUpdateBase):
+    platform: Literal["instagram"]
+    config: Optional[InstagramConfigUpdate] = None
+
+class WhatsAppAccountUpdate(AccountUpdateBase):
+    platform: Literal["whatsapp"]
+    config: Optional[WhatsAppConfigUpdate] = None
+
+# -----------------------------------
+# 4. 辨析联合类型 (分拣器)
 # -----------------------------------
 AccountCreate = Annotated[
     Union[EmailAccountCreate, InstagramAccountCreate, WhatsAppAccountCreate],
     Field(discriminator="platform")
 ]
 
+# 🆕 更新操作的分拣器
+AccountUpdate = Annotated[
+    Union[EmailAccountUpdate, InstagramAccountUpdate, WhatsAppAccountUpdate],
+    Field(discriminator="platform")
+]
+
 # -----------------------------------
-# 4. 响应标准 (回显给前端)
+# 5. 响应标准 (回显给前端)
 # -----------------------------------
 class AccountResponse(BaseModel):
     id: int
     platform: str
     username: str
-    is_valid: bool   # ✅ 你新增的系统健康状态
-    is_active: bool  # ✅ 用户的启停意愿状态
+    # 💥 安全围栏：is_valid 仅在这里出现，确保用户不能通过接口篡改探针结果
+    is_valid: bool
+    is_active: bool
     config: Dict[str, Any]
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

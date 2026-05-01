@@ -64,6 +64,7 @@ export interface AccountResponse {
   platform: 'email' | 'instagram' | 'whatsapp';
   username: string;
   is_active: boolean;
+  is_valid: boolean;
   // 数据库存储的 JSON 字段
   config: EmailConfig | InstagramConfig | WhatsAppConfig;
   created_at?: string;
