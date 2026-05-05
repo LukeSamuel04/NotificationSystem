@@ -5,7 +5,7 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
-
+from app.api.webhooks.instagram_hook import router as instagram_router
 # 路由导入
 from app.api.endpoints import accounts, notifications
 
@@ -90,7 +90,7 @@ async def validation_exception_handler(request, exc):
 # ==========================================
 app.include_router(accounts.router, prefix="/api/accounts", tags=["账号管理"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
-
+app.include_router(instagram_router, prefix="/api/webhooks", tags=["Webhooks"])
 
 @app.get("/", include_in_schema=False)
 async def root():
