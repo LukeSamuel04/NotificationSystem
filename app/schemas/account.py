@@ -1,48 +1,71 @@
+# app/schemas/account.py
 from pydantic import BaseModel, Field
 from typing import Optional, Union, Literal, Dict, Any
 from typing_extensions import Annotated
 from datetime import datetime
 
-# -----------------------------------
-# 0. 账号激活/停用快速配置端口
-# -----------------------------------
+# --------------------------------------------------------------------------
+# 0. 基础交互模型 (Atomic Models)
+# --------------------------------------------------------------------------
+
 class AccountToggle(BaseModel):
+    """用于快速切换账号激活状态的极简载荷"""
     is_active: bool
 
-# -----------------------------------
-# 1. 平台专属的配置子图纸 (Config Schemas)
-# -----------------------------------
+
+# --------------------------------------------------------------------------
+# 1. 平台专属配置图纸 (Platform Specific Configs)
+# --------------------------------------------------------------------------
+
 class EmailConfig(BaseModel):
+    """Email (IMAP) 核心配置逻辑"""
     host: str
     port: Optional[int] = 993
     secure: Optional[bool] = True
+    password: str  # 存储邮件授权码或登录密码
 
 class InstagramConfig(BaseModel):
+    """
+    Instagram (Meta Graph API) 配置
+    💥 [核心修复]：显式定义 access_token，防止 Pydantic 在数据入库前进行安全过滤
+    """
+    access_token: str  # Meta 长期访问令牌 (必备)
     proxy_url: Optional[str] = None
     session_id: Optional[str] = None
 
 class WhatsAppConfig(BaseModel):
+    """WhatsApp Business API 配置"""
     api_key: str
 
-# 🆕 为更新操作准备的配置模型 (所有字段设为 Optional)
+
+# --------------------------------------------------------------------------
+# 2. 更新专用配置图纸 (Update Configs - All Optional)
+# --------------------------------------------------------------------------
+
 class EmailConfigUpdate(BaseModel):
     host: Optional[str] = None
     port: Optional[int] = None
     secure: Optional[bool] = None
+    password: Optional[str] = None
 
 class InstagramConfigUpdate(BaseModel):
+    # 💥 [核心修复]：更新时允许增量修改 Token
+    access_token: Optional[str] = None
     proxy_url: Optional[str] = None
     session_id: Optional[str] = None
 
 class WhatsAppConfigUpdate(BaseModel):
     api_key: Optional[str] = None
 
-# -----------------------------------
-# 2. 派生各个平台的专属账号载荷 (Create)
-# -----------------------------------
+
+# --------------------------------------------------------------------------
+# 3. 账号创建载荷 (Create Schemas)
+# --------------------------------------------------------------------------
+
 class AccountCreateBase(BaseModel):
-    username: str
-    password: str
+    """所有平台账号的公共属性"""
+    platform_account_id: str  # 平台侧唯一标识 (如 IG Business ID 或 Email 地址)
+    username: str             # 用户自定义的显示名称
     is_active: Optional[bool] = True
 
 class EmailAccountCreate(AccountCreateBase):
@@ -57,13 +80,14 @@ class WhatsAppAccountCreate(AccountCreateBase):
     platform: Literal["whatsapp"]
     config: WhatsAppConfig
 
-# -----------------------------------
-# 3. 💥 新增：更新载荷 (Update)
-# -----------------------------------
-# 用于修复 ImportError: cannot import name 'AccountUpdate'
+
+# --------------------------------------------------------------------------
+# 4. 账号更新载荷 (Update Schemas)
+# --------------------------------------------------------------------------
+
 class AccountUpdateBase(BaseModel):
+    platform_account_id: Optional[str] = None
     username: Optional[str] = None
-    password: Optional[str] = None
     is_active: Optional[bool] = None
 
 class EmailAccountUpdate(AccountUpdateBase):
@@ -75,35 +99,43 @@ class InstagramAccountUpdate(AccountUpdateBase):
     config: Optional[InstagramConfigUpdate] = None
 
 class WhatsAppAccountUpdate(AccountUpdateBase):
-    platform: Literal["whatsapp"]
+    platform: Literal["whatsapp"] = "whatsapp"
     config: Optional[WhatsAppConfigUpdate] = None
 
-# -----------------------------------
-# 4. 辨析联合类型 (分拣器)
-# -----------------------------------
+
+# --------------------------------------------------------------------------
+# 5. 辨析联合类型 (Type Discriminators)
+# 💥 这里的逻辑是 FastAPI 路由能够根据 JSON 中的 "platform" 字段自动分发到对应类的关键
+# --------------------------------------------------------------------------
+
 AccountCreate = Annotated[
     Union[EmailAccountCreate, InstagramAccountCreate, WhatsAppAccountCreate],
     Field(discriminator="platform")
 ]
 
-# 🆕 更新操作的分拣器
 AccountUpdate = Annotated[
     Union[EmailAccountUpdate, InstagramAccountUpdate, WhatsAppAccountUpdate],
     Field(discriminator="platform")
 ]
 
-# -----------------------------------
-# 5. 响应标准 (回显给前端)
-# -----------------------------------
+
+# --------------------------------------------------------------------------
+# 6. 统一响应标准 (Response Schema)
+# --------------------------------------------------------------------------
+
 class AccountResponse(BaseModel):
+    """
+    回显给前端的标准模型
+    包含数据库主键 ID 及由后端探针维护的 is_valid 状态
+    """
     id: int
+    platform_account_id: str
     platform: str
     username: str
-    # 💥 安全围栏：is_valid 仅在这里出现，确保用户不能通过接口篡改探针结果
-    is_valid: bool
-    is_active: bool
-    config: Dict[str, Any]
+    is_valid: bool   # 探针验证结果：True 表示连通性正常
+    is_active: bool  # 用户手动开关：True 表示允许巡检
+    config: Dict[str, Any]  # 以字典形式返回配置（脱敏逻辑建议在应用层处理）
     created_at: Optional[datetime] = None
 
     class Config:
-        from_attributes = True
+        from_attributes = True  # 允许从 SQLAlchemy 模型对象直接转换

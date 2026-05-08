@@ -1,5 +1,4 @@
-#重构之后将作废
-# workers/ai/ai_manager.py
+# workers/ai/managers/email.py
 import asyncio
 import logging
 from sqlalchemy.orm import Session, joinedload

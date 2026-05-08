@@ -7,3 +7,4 @@ from .notifications import Notification
 from .analysis import NotificationAnalysis
 from .account import FetchAccount
 from .notification_payloads import NotificationPayload
+from .im_session import IMSessionState

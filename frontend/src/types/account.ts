@@ -62,6 +62,7 @@ export type AccountCreatePayload =
 export interface AccountResponse {
   id: number;
   platform: 'email' | 'instagram' | 'whatsapp';
+  platform_account_id?: string;
   username: string;
   is_active: boolean;
   is_valid: boolean;

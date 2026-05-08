@@ -1,11 +1,13 @@
+# workers/account/availability_tester.py
 import asyncio
 import logging
 from sqlalchemy.orm import Session
 from app.db.session import SessionLocal
 from app.models.account import FetchAccount
 
-# 引入抓取器
+# 引入两个领域的“验钞机”
 from workers.notification.fetchers.email_fetcher import EmailFetcher
+from app.services.instagram.availability_tester import InstagramAvailabilityTester
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("AvailabilityTester")
@@ -53,10 +55,19 @@ async def tester_loop(stop_event: asyncio.Event):
                 accounts = db.query(FetchAccount).filter(FetchAccount.is_active == True).all()
 
                 for acc in accounts:
+                    # 💥 架构升级：在外层根据平台动态组装探针实例
                     if acc.platform == "email":
-                        # 💥 这里的 check_single_account 内部调用了 fetcher.test_connection()
-                        # 确保你的 EmailFetcher.test_connection 是 async def 定义的
-                        await check_single_account(acc, EmailFetcher, db)
+                        # 兼容由于 Schema 升级被提取到外层的 username
+                        test_config = {**acc.config, "user": acc.username}
+                        tester = EmailFetcher(test_config)
+                        await check_single_account(acc, tester, db)
+
+                    elif acc.platform == "instagram":
+                        tester = InstagramAvailabilityTester(
+                            meta_id=acc.platform_account_id,
+                            access_token=acc.config.get("access_token")
+                        )
+                        await check_single_account(acc, tester, db)
 
                 db.commit()
             except Exception as e:
@@ -73,17 +84,16 @@ async def tester_loop(stop_event: asyncio.Event):
 
     logger.info("🛑 账号巡检探针已安全下线。")
 
-async def check_single_account(acc: FetchAccount, FetcherClass, db: Session):
+async def check_single_account(acc: FetchAccount, tester_instance, db: Session):
     """
-    分类探测与防抖容错逻辑 (业务逻辑保持不变)
+    分类探测与防抖容错逻辑 (拥抱多态)
     """
     try:
         if acc.id not in FAIL_COUNTS:
             FAIL_COUNTS[acc.id] = 0
 
-        # 实例化并调用异步测试函数
-        fetcher = FetcherClass(acc.config)
-        is_success = await fetcher.test_connection()
+        # 💥 核心改动：直接调用传入实例的测试方法
+        is_success = await tester_instance.test_connection()
 
         if is_success:
             FAIL_COUNTS[acc.id] = 0

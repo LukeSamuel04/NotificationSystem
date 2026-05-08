@@ -1,59 +1,83 @@
+# app/api/endpoints/accounts.py
+import logging
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
-import asyncio
 
 from app.db.session import get_db
 from app.models.account import FetchAccount
 from app.schemas.account import AccountCreate, AccountResponse, AccountUpdate, AccountToggle
-from workers.notification.fetchers.email_fetcher import EmailFetcher
 
+# 🛡️ 核心验证逻辑引入
+from workers.notification.fetchers.email_fetcher import EmailFetcher
+from app.services.instagram.availability_tester import InstagramAvailabilityTester
+
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 # ==========================================
-# 1. 列表获取
+# 1. 列表获取 (Dashboard 渲染源)
 # ==========================================
 @router.get("/", response_model=List[AccountResponse])
 def get_accounts(db: Session = Depends(get_db)):
-    """获取所有账号列表"""
+    """获取所有账号，用于前端 Dashboard 的状态展示"""
     return db.query(FetchAccount).all()
 
 
 # ==========================================
-# 2. 新建账号 (强验证)
+# 2. 新建账号 (核心防火墙：验钞不通过不入库)
 # ==========================================
 @router.post("/", response_model=AccountResponse)
 async def create_account(account_in: AccountCreate, db: Session = Depends(get_db)):
-    """新建账号：验证通过后方可入库"""
-    # 1. 查重
+    """
+    新建账号链路：
+    1. 唯一性冲突检查 (platform + platform_account_id)
+    2. 调用第三方平台探针进行“真伪/存活”验证
+    3. 验证通过后持久化到数据库
+    """
+    # 1. 唯一性查重 (防止同一个 IG ID 或 Email 被重复绑定)
     existing_acc = db.query(FetchAccount).filter(
         FetchAccount.platform == account_in.platform,
-        FetchAccount.username == account_in.username
+        FetchAccount.platform_account_id == account_in.platform_account_id
     ).first()
+
     if existing_acc:
-        raise HTTPException(status_code=400, detail="该账号已经绑定过了！")
+        raise HTTPException(status_code=400, detail="该外部账号 ID 已经绑定过了！")
 
-    # 2. 准备配置字典并压入凭证
-    config_dict = account_in.config.dict() if hasattr(account_in.config, 'dict') else account_in.config
-    config_dict.update({
-        "user": account_in.username,
-        "password": account_in.password  # 密码被收纳进 JSON 字段
-    })
+    # 2. 准备配置字典 (适配 Pydantic v1/v2)
+    config_dict = account_in.config.model_dump() if hasattr(account_in.config,
+                                                            'model_dump') else account_in.config.dict()
 
-    # 3. 强验证拦截
+    # 3. 💥 关键点：强验证拦截
     if account_in.platform == "email":
-        is_valid = await EmailFetcher(config_dict).test_connection()
-        if not is_valid:
-            raise HTTPException(status_code=400, detail="验证失败！请检查授权码或服务器配置。")
+        # Email 验证：需要注入 username 进行 IMAP 登录尝试
+        test_config = {**config_dict, "user": account_in.username}
+        if not await EmailFetcher(test_config).test_connection():
+            raise HTTPException(status_code=400, detail="邮件服务器连接失败，请检查 Host 或授权码。")
 
-    # 4. 实例化模型 (注意：这里不再传入不存在的 password 参数)
+    elif account_in.platform == "instagram":
+        # Instagram 验证：调用你刚刚写好的 AvailabilityTester
+        # 它会拿着 Token 去向 Meta 官方请求，如果输入的是 "111"，这里会返回 False
+        access_token = config_dict.get("access_token")
+        tester = InstagramAvailabilityTester(
+            meta_id=account_in.platform_account_id,
+            access_token=access_token
+        )
+
+        if not await tester.test_connection():
+            raise HTTPException(status_code=400, detail="Instagram 令牌或 ID 无效，Meta 拒绝连接。")
+
+        logger.info(f"✅ Instagram 验证通过，准许入库: {account_in.username}")
+
+    # 4. 实例化模型并持久化 (只有通过验证才能走到这里)
     new_account = FetchAccount(
         platform=account_in.platform,
+        platform_account_id=account_in.platform_account_id,
         username=account_in.username,
-        # ❌ 移除了 password=account_in.password，因为 Model 里没这一列
-        is_active=getattr(account_in, 'is_active', True),
-        is_valid=True,
+        is_active=account_in.is_active,
+        is_valid=True,  # 既然刚过验证，初始状态必为 True
         config=config_dict
     )
     db.add(new_account)
@@ -63,72 +87,85 @@ async def create_account(account_in: AccountCreate, db: Session = Depends(get_db
 
 
 # ==========================================
-# 3. 更新账号 (增量合并 + 验证)
+# 3. 更新账号 (逻辑合并 + 二次验证)
 # ==========================================
 @router.put("/{account_id}", response_model=AccountResponse)
 async def update_account(account_id: int, account_in: AccountUpdate, db: Session = Depends(get_db)):
-    """更新账号：防止 JSON 覆盖，支持局部更新"""
+    """更新账号：支持增量配置合并，并对变更后的配置重新发起探针"""
     account = db.query(FetchAccount).filter(FetchAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
 
-    update_data = account_in.dict(exclude_unset=True)
+    update_data = account_in.model_dump(exclude_unset=True) if hasattr(account_in, 'model_dump') else account_in.dict(
+        exclude_unset=True)
     current_config = dict(account.config) if account.config else {}
 
-    if account.platform == "email":
-        if "config" in update_data:
-            new_host = update_data["config"].get("host")
-            if new_host and new_host != current_config.get("host"):
-                raise HTTPException(status_code=400, detail="禁止修改服务器地址 (Host)")
+    # A. 如果更新包含 config，进行深度合并
+    if "config" in update_data:
+        merged_config = {**current_config, **update_data["config"]}
+        update_data["config"] = merged_config
 
-        # ⚡ 准备测试快照：合并新旧数据
-        test_config = current_config.copy()
-        if "username" in update_data: test_config["user"] = update_data["username"]
-        if "password" in update_data: test_config["password"] = update_data["password"]
-        if "config" in update_data: test_config.update(update_data["config"])
+    # B. 如果账号是开启状态，且关键配置发生了变化，必须重新验证
+    is_active_now = update_data.get("is_active", account.is_active)
+    if is_active_now and "config" in update_data:
+        if account.platform == "email":
+            test_config = {**update_data["config"], "user": update_data.get("username", account.username)}
+            if not await EmailFetcher(test_config).test_connection():
+                raise HTTPException(status_code=400, detail="更新失败：新邮件配置无法连接服务器。")
 
-        # 🚀 只有在“开启”状态下更新才触发网络验证
-        is_active_now = update_data.get("is_active", account.is_active)
-        if is_active_now:
-            is_valid = await EmailFetcher(test_config).test_connection()
-            if not is_valid:
-                raise HTTPException(status_code=400, detail="更新失败：新配置无法连接服务器。")
+        elif account.platform == "instagram":
+            # 对更新后的 Token 再次验钞
+            tester = InstagramAvailabilityTester(
+                meta_id=account.platform_account_id,
+                access_token=update_data["config"].get("access_token")
+            )
+            if not await tester.test_connection():
+                raise HTTPException(status_code=400, detail="更新失败：新的 Instagram 令牌无效。")
 
-        # 验证通过后，将合并后的快照存入 update_data 的 config 键中
-        update_data["config"] = test_config
-
-    # 💥 关键点：从 update_data 中移除 password 键
-    # 因为 password 已经合并到 config 字典里了，如果不移除，下面的 setattr 会报错
-    update_data.pop("password", None)
-
-    # 执行字段更新
+    # C. 执行字段映射与更新
     for field, value in update_data.items():
         setattr(account, field, value)
 
-    account.is_valid = True
+    account.is_valid = True  # 验证通过后重置有效状态
     db.commit()
     db.refresh(account)
     return account
 
 
 # ==========================================
-# 4. 删除账号
+# 4. 删除账号 (物理切断：不仅删库，还要拔线)
 # ==========================================
 @router.delete("/{account_id}")
-def delete_account(account_id: int, db: Session = Depends(get_db)):
+async def delete_account(account_id: int, db: Session = Depends(get_db)):
+    """绝对解绑：删除本地数据的同时，尝试调用 Meta API 撤销应用授权"""
     account = db.query(FetchAccount).filter(FetchAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
+
+    if account.platform == "instagram":
+        access_token = account.config.get("access_token")
+        if access_token:
+            try:
+                async with httpx.AsyncClient() as client:
+                    # 💥 向 Meta 发起 DELETE 请求，注销该 App 对此账号的权限
+                    meta_url = f"https://graph.facebook.com/v19.0/{account.platform_account_id}/permissions"
+                    response = await client.delete(meta_url, params={"access_token": access_token})
+                    if response.status_code == 200:
+                        logger.info(f"✅ Meta 授权已撤销: {account.platform_account_id}")
+            except Exception as e:
+                logger.error(f"🌐 尝试撤销 Meta 授权时发生异常: {e}")
+
     db.delete(account)
     db.commit()
-    return {"message": "账号解除绑定成功"}
+    return {"message": "账号已彻底移除并解除授权"}
 
 
 # ==========================================
-# 5. 状态切换 (Patch)
+# 5. 快速状态切换 (Toggle 开关)
 # ==========================================
 @router.patch("/{account_id}/toggle", response_model=AccountResponse)
 async def toggle_account(account_id: int, toggle_in: AccountToggle, db: Session = Depends(get_db)):
+    """仅切换启用/禁用状态，不触发探针（用于前端 Switch 开关）"""
     account = db.query(FetchAccount).filter(FetchAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
