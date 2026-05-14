@@ -1,87 +1,101 @@
-from transformers import pipeline
+# workers/ai/models/email/scorer.py
 import os
+import logging
+from typing import Optional
+from pydantic import BaseModel, ValidationError
+from openai import AsyncOpenAI
+from dotenv import load_dotenv, find_dotenv
 
-# 阻止一些不必要的警告信息
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+logger = logging.getLogger("EmailScorer")
+load_dotenv(find_dotenv(), override=True)
 
-# ==========================================
-# 业务超参数配置 (Hyperparameters)
-# ==========================================
-AI_ALPHA = 0.6  # 分数计算公式中，业务权重的占比 (0~1 之间)
+ai_client = AsyncOpenAI(
+    api_key=os.getenv("LLM_API_KEY"),
+    base_url=os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+)
+DEFAULT_MODEL = os.getenv("LLM_MODEL_NAME", "gemini-2.5-flash")
 
-# 分类标签及其对应的业务权重配置
-CATEGORY_WEIGHTS = {
-    "urgent_alert": 0.9,
-    "study_work": 0.8,
-    "bills_housing": 0.7,
-    "social_personal": 0.4,
-    "advertisement_spam": 0.1
-}
-
-print("--- [系统提示] 正在初始化本地 AI 模型... ---")
-print("--- [系统提示] 首次启动将下载约 260MB 模型文件，请保持网络畅通 ---")
-
-try:
-    # 加载零样本分类流水线
-    classifier = pipeline(
-        "zero-shot-classification",
-        model="typeform/distilbert-base-uncased-mnli",
-        device=-1  # 强制使用 CPU 运行
-    )
-    print("--- [系统提示] 本地 AI 模型加载成功！ ---")
-except Exception as e:
-    print(f"--- [警告] 本地模型加载失败: {e} ---")
-    classifier = None
+class EmailAIResult(BaseModel):
+    category_id: int    # 💥 改为强类型的整数 ID
+    priority_score: int
+    summary: str
 
 
-def analyze_email_priority(subject: str, content: str) -> dict:
+async def analyze_email_context(email_script: str) -> Optional[EmailAIResult]:
     """
-    完全在本地 CPU 运行的邮件优先级分析逻辑
-    :param subject: 邮件/通知的标题
-    :param content: 邮件/通知的洗净后的正文
-    :return: 包含分数、分类和摘要(为 None)的字典
+    基于 7 维矩阵与动态摘要的 Email AI 核心打分引擎
     """
-    # 如果模型加载失败，返回容错的字典数据
-    if classifier is None:
-        print("--- [错误] 模型未加载，返回保底分 ---")
-        return {"priority_score": 5.0, "category": "local_error", "summary": None}
+    system_prompt = """你是一个专门为我处理电子邮件的顶级私人 AI 助理。你的任务是阅读一段经过清洗提纯的邮件对话剧本，并提取核心状态。
+    剧本中包含了【邮件主题】、【对话背景】以及【！！当前待处理邮件！！】。
 
-    # 1. 容错处理：确保即使传入全空字符串也能正常运转
-    safe_subject = subject.strip() if subject.strip() else "No Subject"
-    safe_content = content.strip() if content.strip() else "No Content"
+    请严格按照以下要求进行评估，重点关注【当前待处理邮件】的核心诉求：
 
-    # 如果标题和内容全是空的，直接打入垃圾箱
-    if safe_subject == "No Subject" and safe_content == "No Content":
-        return {"priority_score": 2.0, "category": "advertisement_spam", "summary": None}
+    1. 【分类 ID (category_id)】：请严格输出 1 到 7 的整数，对应以下七大分类：
+       1: 紧急告警 (如：服务器宕机、异地登录、高危安全提醒)
+       2: 验证码与重置 (如：登录验证码、重置密码链接)
+       3: 工作与学业 (如：教授通知、作业提醒、项目沟通)
+       4: 财务与物流 (如：账单、发票、快递状态、充值成功)
+       5: 私人社交 (如：真人的邮件沟通、聚会邀请)
+       6: 系统与订阅 (如：技术周报、GitHub PR 提醒、平台例行通知)
+       7: 垃圾与推销 (如：打折广告、无营养推销)
 
-    # 2. 内部拼装给模型“吃”的文本
-    text_to_analyze = f"Subject: {safe_subject}. Content: {safe_content}"
+    2. 【紧急度评分 (priority_score)】：给出一个 1-10 的整数评分：
+       - 分类 2 (验证码) 且是最新的：必须给 10 分。
+       - 分类 1 (紧急告警)：通常 9-10 分。
+       - 分类 7 (垃圾推销)：必须强制为 1 分。
+       - 其他分类根据诉求的时效性和重要性在 2-8 分之间评估。
+       - ⚠️ 注意：如果剧本最后一条显示是我自己发出的（或者表明我已经妥善处理了），说明正在“等待对方回复”，无论什么分类，紧急度应强制降至 1-3 分。
 
-    # 动态获取标签列表
-    labels = list(CATEGORY_WEIGHTS.keys())
+    3. 【智能摘要 (summary)】：根据分类动态决定摘要的长度和格式：
+       - 如果是分类 2 (验证码)：直接输出“验证码：XXXX”或提取核心链接，绝对不要加废话。
+       - 如果是分类 7 (垃圾推销)：极简概括，例如“Willys 的促销广告”。
+       - 其他分类：用 1-2 句话精炼总结核心诉求和接下来的行动指令（例如“AWS发来服务器报价，需周五前回复”）。
+
+    必须直接返回纯洁的 JSON 字符串，且严格包含以下字段：
+    {
+        "category_id": int,
+        "priority_score": int,
+        "summary": "string"
+    }
+    【极其重要】：绝对不要使用 ```json 等代码块标记包裹数据！也不要包含任何类似“Here is the JSON”的提示性废话！只输出大括号 {} 及其内部的内容！
+    """
 
     try:
-        # 3. 本地推理
-        result = classifier(text_to_analyze, candidate_labels=labels)
+        logger.debug(f"🧠 准备向 {DEFAULT_MODEL} 发送邮件剧本，长度: {len(email_script)}")
 
-        # 解析结果
-        category = result['labels'][0]
-        confidence = result['scores'][0]
+        response = await ai_client.chat.completions.create(
+            model=DEFAULT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"以下是邮件剧本：\n\n{email_script}"}
+            ],
+            temperature=0.0,  # 💥 温度降到最低 0，保证分类 ID 绝对稳定，杜绝幻觉
+            max_tokens=2000
+        )
 
-        # 4. 计算得分
-        w_cat = CATEGORY_WEIGHTS.get(category, 0.5)
-        raw_score = (AI_ALPHA * w_cat + (1 - AI_ALPHA) * confidence) * 10
-        final_score = round(min(max(raw_score, 0.0), 10.0), 2)
+        raw_json_str = response.choices[0].message.content
 
-        print(f"--- [本地 AI 分析成功] 分类: {category}, 最终分: {final_score} ---")
+        if not raw_json_str:
+            logger.error("❌ AI 返回了空值。")
+            return None
 
-        # 5. 返回字典（对齐 manager 的期待格式）
-        return {
-            "priority_score": final_score,
-            "category": category,
-            "summary": None  # 本地分类模型不负责生成摘要，安全置空
-        }
+        logger.debug(f"🤖 AI 原始返回: {raw_json_str}")
 
+        start_idx = raw_json_str.find('{')
+        end_idx = raw_json_str.rfind('}')
+
+        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+            clean_json_str = raw_json_str[start_idx:end_idx + 1]
+        else:
+            clean_json_str = raw_json_str
+
+        # 验证 JSON 并转换为对象
+        result = EmailAIResult.model_validate_json(clean_json_str)
+        return result
+
+    except ValidationError as ve:
+        logger.error(f"❌ 数据不符合 Schema: {ve}\n脏数据: {raw_json_str}")
+        return None
     except Exception as e:
-        print(f"--- [异常] 推理过程出错: {e} ---")
-        return {"priority_score": 5.0, "category": "general", "summary": None}
+        logger.error(f"💥 AI 接口严重错误: {e}")
+        return None

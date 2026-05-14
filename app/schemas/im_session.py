@@ -35,7 +35,7 @@ class IMSessionStateResponse(IMSessionAIResult):
     包含了所有数据库字段。
     """
     external_sender_id: str
-    account_id: str  # 💥 新增：系统接收账号 ID，与数据库复合主键对应
+    account_id: int
     platform: str
     last_message_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

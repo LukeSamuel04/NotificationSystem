@@ -45,12 +45,12 @@ class Notification(Base):
     # 1. 账号关联 (多对一)
     account = relationship("FetchAccount", back_populates="notifications")
 
-    # 2. AI 分析结果关联 (一对一)
-    analysis = relationship(
-        "NotificationAnalysis",
+    # 2. 💥 核心修复：更新为 email_analysis 映射，完美对接底层 back_populates
+    email_analysis = relationship(
+        "EmailAnalysis",  # 对应 EmailAnalysis 类的名字
         back_populates="notification",
-        uselist=False,
-        cascade="all, delete-orphan"
+        uselist=False,  # 一对一关系
+        cascade="all, delete-orphan",
     )
 
     # 3. 冷数据载荷表关联 (一对一)

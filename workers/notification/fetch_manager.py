@@ -1,3 +1,4 @@
+# workers/notification/fetch_manager.py
 import logging
 import asyncio
 from datetime import datetime
@@ -9,20 +10,13 @@ from app.models.notification_payloads import NotificationPayload
 from app.models.account import FetchAccount
 from ..notification.utils.html_cleaner import clean_html
 
-# 引入极速异步邮件引擎
 from workers.notification.fetchers.email_fetcher import EmailFetcher
+from workers.ai.managers.email_scheduler import trigger_email_scan
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger("FetchManager")
 
-
 def process_and_save_message(db: Session, account: FetchAccount, raw_message_data: dict):
-    """
-    处理单条抓取到的原始消息并存入数据库 (保持同步逻辑，由外部线程池驱动)
-    """
+    """处理单条消息并提交进数据库引擎"""
     try:
         existing = db.query(Notification).filter(
             Notification.account_id == account.id,
@@ -36,14 +30,21 @@ def process_and_save_message(db: Session, account: FetchAccount, raw_message_dat
         raw_content = raw_message_data.get('content', '')
         cleaned_text = clean_html(raw_content) if platform == 'email' else raw_content
 
+        is_from_me = raw_message_data.get('is_from_me', False)
+        final_status = "processed" if is_from_me else "pending"
+
         new_notification = Notification(
             account_id=account.id,
+            platform=platform,
             account_msg_id=raw_message_data['account_msg_id'],
             sender=raw_message_data['sender'],
+            external_sender_id=raw_message_data.get('external_sender_id'),
+            reply_to_mid=raw_message_data.get('reply_to_mid'),
             subject=raw_message_data['subject'],
             cleaned_content=cleaned_text,
-            status="pending",
-            received_at=raw_message_data.get('received_at')
+            status=final_status,
+            is_from_me=is_from_me,
+            received_at=raw_message_data.get('received_at', datetime.now())
         )
         db.add(new_notification)
         db.flush()
@@ -57,7 +58,7 @@ def process_and_save_message(db: Session, account: FetchAccount, raw_message_dat
             raw_payload={
                 "source_platform": platform,
                 "raw_ingested_content": raw_content,
-                "ingestion_metadata": {"worker_version": "2.1", "original_data": save_backup_data}
+                "ingestion_metadata": {"original_data": save_backup_data}
             }
         )
         db.add(payload_record)
@@ -68,41 +69,50 @@ def process_and_save_message(db: Session, account: FetchAccount, raw_message_dat
         logger.error(f"❌ 消息入库失败: {str(e)}")
         return None
 
-
 async def fetch_messages_for_account(account: FetchAccount) -> list[dict]:
-    """分类处理标记已读 (纯异步函数)"""
+    """协同调用底层网关完成数据采集与回写"""
     platform = account.platform.lower()
     if platform == 'email':
         account_config = getattr(account, 'config', {}) or {}
         config = {
             "host": account_config.get("host"),
             "user": account.username,
-            "password": account.password  # 确保使用最新的 account 属性
+            "password": account_config.get("password")
         }
         try:
             fetcher = EmailFetcher(config)
             raw_msgs = await fetcher.fetch_new()
 
-            # 批量标记已读，减少网络 IO 往返
-            await asyncio.gather(*[fetcher.mark_as_processed(msg["msg_id"]) for msg in raw_msgs])
+            # 筛选出需要标记已读的目标（第三方寄送的信件）
+            msgs_to_mark = [msg for msg in raw_msgs if not msg.get("is_from_me")]
+            if msgs_to_mark:
+                # 💥 防御性打磨：稍微给云端1秒喘息期，保障并发套接字连接稳定性
+                await asyncio.sleep(1)
+                await asyncio.gather(*[
+                    fetcher.mark_as_processed(
+                        msg["account_msg_id"],
+                        # 完美提取底层写入的原生出处目录，规避盲目检索
+                        folder=msg.get("source_folder", "INBOX")
+                    ) for msg in msgs_to_mark
+                ])
 
             return [{
-                "account_msg_id": msg["msg_id"],
+                "account_msg_id": msg["account_msg_id"],
+                "reply_to_mid": msg.get("reply_to_mid"),
                 "sender": msg.get("sender", "Unknown"),
+                "external_sender_id": msg.get("external_sender_id"),
                 "subject": msg.get("subject", "No Subject"),
                 "content": msg.get("content", ""),
+                "is_from_me": msg.get("is_from_me", False),
                 "received_at": datetime.now()
             } for msg in raw_msgs]
         except Exception as e:
-            logger.error(f"❌ 邮件抓取失败: {e}")
+            logger.error(f"❌ 邮件协议协同断开: {e}")
             return []
     return []
 
-
 async def fetch_loop(stop_event: asyncio.Event, new_data_event: asyncio.Event, poll_interval: int = 60):
-    """
-    抓取引擎主循环：已接入 stop_event 遥控器与线程隔离技术
-    """
+    """常驻级静默扫盘死循环引擎"""
     logger.info("🚀 抓取引擎 (Fetch Loop) 已就绪...")
 
     while not stop_event.is_set():
@@ -116,8 +126,6 @@ async def fetch_loop(stop_event: asyncio.Event, new_data_event: asyncio.Event, p
 
             for account in active_accounts:
                 raw_messages = await fetch_messages_for_account(account)
-
-                # 💥 核心改进：将同步入库逻辑丢进线程池，防止阻塞 API 主线程
                 for raw_msg in raw_messages:
                     result = await asyncio.to_thread(process_and_save_message, db, account, raw_msg)
                     if result:
@@ -129,9 +137,10 @@ async def fetch_loop(stop_event: asyncio.Event, new_data_event: asyncio.Event, p
             db.close()
 
         if has_new_data:
+            logger.info("⚡ 侦测到新邮件入库，正在直接唤醒 AI 算分执行器...")
             new_data_event.set()
+            trigger_email_scan()
 
-        # 使用优雅休眠，随时响应停机信号
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
         except asyncio.TimeoutError:

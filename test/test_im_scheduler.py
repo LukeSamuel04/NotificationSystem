@@ -5,6 +5,7 @@ import os
 import uuid
 import logging
 from datetime import datetime, timedelta
+from app.models.email_analysis import EmailAnalysis
 
 # 💥 打开全局探头：将所有的日志强制输出到控制台，以便我们看清后台到底发生了什么
 logging.basicConfig(

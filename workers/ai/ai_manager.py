@@ -9,7 +9,7 @@ from app.models.notifications import Notification
 from app.models.analysis import NotificationAnalysis
 from app.models.account import FetchAccount
 
-from workers.ai.models.email.scorer import analyze_email_priority
+from workers.ai.models.email.scorer_local import analyze_email_priority
 
 logger = logging.getLogger("AIManager")
 

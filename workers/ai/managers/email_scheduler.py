@@ -1,120 +1,88 @@
-# workers/ai/managers/email.py
+# workers/ai/managers/email_scheduler.py
 import asyncio
 import logging
-from sqlalchemy.orm import Session, joinedload
+
+# 引入数据库连接池生成器
 from app.db.session import SessionLocal
 
-from app.models.notifications import Notification
-from app.models.analysis import NotificationAnalysis
-from app.models.account import FetchAccount
+# 💥 引入专职干活的 Email 算分流水线执行器
+from workers.ai.managers.email_executor import process_pending_emails
 
-from workers.ai.models.email.scorer import analyze_email_priority
+logger = logging.getLogger("EmailScheduler")
 
-logger = logging.getLogger("AIManager")
+# =====================================================================
+# 1. 全局信号开关 (拉取脚本/IMAP IDLE 监听器的专属门铃)
+# =====================================================================
+_email_scan_trigger = asyncio.Event()
 
 
-async def process_pending_notifications(db: Session, batch_size: int = 50) -> int:
-    """【已路由化 & 异步化】扫描待处理数据，进行 AI 算分"""
-    pending_msgs = db.query(Notification) \
-        .options(joinedload(Notification.account)) \
-        .filter(Notification.status == "pending") \
-        .limit(batch_size) \
-        .all()
+def trigger_email_scan():
+    """
+    暴露给外部收件模块（如 IMAP 轮询服务或新邮件拉取脚本）的接口。
+    一旦底层成功将新邮件落盘入库，立即按响此门铃，唤醒 AI 执行流水线。
+    """
+    _email_scan_trigger.set()
 
-    if not pending_msgs:
-        return 0
 
-    logger.info(f"⚙️ 捞取到 {len(pending_msgs)} 条待处理消息，开始智能路由与 AI 算分...")
-    processed_count = 0
+# =====================================================================
+# 2. 扫盘统筹动作
+# =====================================================================
+async def perform_email_scan():
+    """
+    统筹邮件业务线的一次完整扫盘与闭环动作
+    """
+    logger.debug("🔍 Email 调度器：开始执行邮件待办扫盘...")
 
-    for msg in pending_msgs:
-        try:
-            if not msg.account:
-                logger.error(f"❌ 消息 {msg.id} 找不到关联的账号信息，无法判断平台。")
-                msg.status = "error"
-                continue
-
-            platform = msg.account.platform.lower()
-            ai_result = None
-
-            if platform == 'email':
-                ai_result = await asyncio.to_thread(
-                    analyze_email_priority,
-                    subject=msg.subject or "",
-                    content=msg.cleaned_content or ""
-                )
-            elif platform in ['instagram', 'whatsapp']:
-                logger.info(f"🚧 平台 [{platform.upper()}] 的 AI 模型尚未挂载，跳过评分。")
-                continue
-            else:
-                logger.warning(f"❓ 未知平台 [{platform}]，无法路由到对应的 AI 模型。")
-                msg.status = "error"
-                continue
-
-            if ai_result:
-                analysis_record = NotificationAnalysis(
-                    notification_id=msg.id,
-                    priority_score=ai_result.get("priority_score"),
-                    category=ai_result.get("category"),
-                    summary=ai_result.get("summary")
-                )
-                db.add(analysis_record)
-
-                msg.status = "unread"
-                processed_count += 1
-            else:
-                logger.warning(f"⚠️ 消息 {msg.id} AI 分析未返回有效结果")
-                msg.status = "error"
-
-        except Exception as e:
-            logger.error(f"❌ 处理消息 ID {msg.id} 时发生错误: {e}")
-            msg.status = "error"
-
+    # 💥 关键守卫：每次扫盘从连接池获取独立 Session，确保线程/协程安全
+    db = SessionLocal()
     try:
-        db.commit()
-        logger.info(f"✅ 成功完成 {processed_count} 条消息的 AI 算分并入库！")
+        # 移交数据库会话给 Executor 执行长文本聚合与 LLM 推理
+        processed_threads = await process_pending_emails(db)
+
+        if processed_threads and processed_threads > 0:
+            logger.info(f"✅ Email 调度器：本轮扫盘结束，成功归档并闭环了 {processed_threads} 个邮件 Thread。")
+
     except Exception as e:
-        db.rollback()
-        logger.error(f"💥 数据库保存失败，已回滚: {e}")
-        return 0
+        logger.error(f"❌ Email 调度器：执行邮件算分任务时发生严重异常: {e}")
+    finally:
+        # 💥 绝对规则：用完即焚，立刻释放连接回池，防止造成连接泄露
+        db.close()
 
-    return processed_count
 
+# =====================================================================
+# 3. 守护进程主循环 (后台死循环待命)
+# =====================================================================
+async def start_email_scheduler():
+    """
+    Email 后台智能处理调度中心的主循环
+    """
+    logger.info("🚀 Email Scheduler (邮件智能调度中心) 已启动，进入全天候轮询与监听状态！")
 
-# 💥 架构升级：引入 new_data_event 事件驱动
-async def ai_loop(stop_event: asyncio.Event, new_data_event: asyncio.Event):
-    logger.info("🤖 AI 质检中心启动！进入扫地僧模式，先清空历史积压...")
+    # 1. 启动初期：无条件扫盘一次，清空服务宕机或重启期间积压的未处理邮件
+    await perform_email_scan()
 
-    while not stop_event.is_set():
-        db = SessionLocal()
+    # 2. 进入永恒的守护循环
+    while True:
         try:
-            processed_count = await process_pending_notifications(db, batch_size=50)
+            # 核心机制：默认挂起等待 30 秒。
+            # 场景 A: 如果新邮件收取脚本调用了 trigger_email_scan()，瞬间被唤醒。
+            # 场景 B: 30 秒内无事发生，触发超时，平滑执行兜底扫盘。
+            await asyncio.wait_for(_email_scan_trigger.wait(), timeout=30.0)
 
-            if processed_count > 0:
-                # 💥 只要还有积压，坚决不睡，连轴转！
-                logger.info("🔥 发现库里还有积压数据，继续全速扫盘...")
-                await asyncio.sleep(0.5)  # 仅做极其微小的让步，防 CPU 100% 卡死
-                continue
+            logger.info("⚡ 接收到新邮件落盘入库信号，立即触发 AI 深度解析！")
 
-            else:
-                # 💥 扫盘彻底干净了！重置对讲机，准备进入深度休眠
-                logger.info("📭 数据库已完全干净。重置对讲机，挂起休眠...")
-                new_data_event.clear()
+            # 唤醒后立刻重位触发器，准备接收下一次唤醒脉冲
+            _email_scan_trigger.clear()
 
-        except Exception as e:
-            logger.error(f"🔥 AI Worker 遇到致命错误: {e}")
-            await asyncio.sleep(5)  # 报错了就缓一口气，再试
-        finally:
-            db.close()
-
-        # 💥 深度挂起监听：死等 new_data_event 发信号！
-        # 但我们用 timeout=60 防御性编程，每分钟微睁眼看一次关机信号，以免死锁
-        try:
-            await asyncio.wait_for(new_data_event.wait(), timeout=60)
-            if new_data_event.is_set():
-                 logger.info("⚡ 收到抓取引擎对讲机呼叫，AI 瞬间唤醒！")
         except asyncio.TimeoutError:
-            # 60秒都没人叫我，没关系，进入下一个 while 循环看一眼关机灯，继续扫盘/睡
+            # 静默超时触发常规防线巡逻
+            logger.debug("⏱️ 邮件 30秒 兜底定时巡逻触发...")
             pass
 
-    logger.info("🛑 AI 质检中心收到停机信号，安全下线。")
+        except Exception as e:
+            # 防御性静默恢复：避免未知代码级崩溃引发死循环雪崩
+            logger.error(f"💥 Email Scheduler 守护协程意外中断: {e}")
+            await asyncio.sleep(5)
+
+        # 无论由哪种途径触发，统一进入核心扫盘闭环
+        await perform_email_scan()

@@ -1,74 +1,105 @@
+# workers/main.py
 import asyncio
 import logging
 import sys
 
-# 引入三大兵营的主循环
-# 注意：请确保这些导入路径与你的实际文件路径完全一致
+# 1. 引入账号巡视与抓取引擎
 from workers.account.availability_tester import tester_loop
 from workers.notification.fetch_manager import fetch_loop
-from workers.ai.ai_manager import ai_loop
+
+# 2. 引入全新的全渠道并发 AI 矩阵 (已对齐新架构)
+from workers.ai.managers.im_scheduler import start_im_scheduler
+from workers.ai.managers.email_scheduler import start_email_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("SystemMain")
+logger = logging.getLogger("SystemMatrix")
 
 
 async def main():
-    logger.info("========================================")
-    logger.info("🌟 分布式后台引擎 (Workers) 正在启动 🌟")
-    logger.info("========================================")
+    logger.info("==================================================")
+    logger.info("🌟 全渠道分布式后台矩阵 (Workers Matrix) 正在启动 🌟")
+    logger.info("==================================================")
 
-    # 1. 制造“进程级”全局遥控器：优雅关机信号
+    # 全局遥控器：优雅关机信号
     stop_event = asyncio.Event()
-    # 2. 制造“业务级”专线对讲机：数据唤醒信号
+    # 业务对讲机：数据唤醒信号（fetch_loop 仍会设置它以保持兼容）
     new_data_event = asyncio.Event()
 
-    # 3. 将三大战将拉起，分配遥控器和对讲机
-    logger.info("正在唤醒三大战将...")
+    logger.info("正在部署各战区守护协程...")
 
-    # 启动心跳探针 (独立运行，只需要停机遥控器，这里假设你的函数也改成了接受 stop_event)
-    tester_task = asyncio.create_task(tester_loop(stop_event))
+    # --- 战区一：账号心跳巡视 (Tester) ---
+    # 负责定时检查所有绑定账号（如邮箱 IMAP、IG Token）是否依然可用
+    tester_task = asyncio.create_task(
+        tester_loop(stop_event),
+        name="AccountTesterTask"
+    )
 
-    # 启动抓取引擎 (采购员：拿到遥控器 + 对讲机发射端)
-    # 设定每 60 秒巡视一次全网账号
-    fetch_task = asyncio.create_task(fetch_loop(stop_event, new_data_event, poll_interval=60))
+    # --- 战区二：新数据采购员 (Fetcher) ---
+    # 负责每 60 秒主动扫盘（邮件等），发现新数据后直接 trigger 下游
+    fetch_task = asyncio.create_task(
+        fetch_loop(stop_event, new_data_event, poll_interval=60),
+        name="FetchManagerTask"
+    )
 
-    # 启动 AI 算分引擎 (扫地僧：拿到遥控器 + 对讲机接收端)
-    ai_task = asyncio.create_task(ai_loop(stop_event, new_data_event))
+    # --- 战区三：IM 熟肉加工厂 (IM Scheduler) ---
+    # 24小时待命，等待 Webhook 路由直接触发 trigger_immediate_scan()
+    im_ai_task = asyncio.create_task(
+        start_im_scheduler(),
+        name="IMSchedulerTask"
+    )
+
+    # --- 战区四：Email 熟肉加工厂 (Email Scheduler) ---
+    # 24小时待命，等待 fetch_loop 抓到新邮件后直接 trigger_email_scan()
+    email_ai_task = asyncio.create_task(
+        start_email_scheduler(),
+        name="EmailSchedulerTask"
+    )
 
     try:
-        # 主线程在这里“挂机”，维持整个异步宇宙的运转
-        logger.info("✅ 所有引擎已成功挂载！系统进入自动巡航模式。")
-        while True:
-            await asyncio.sleep(1)
+        logger.info("✅ 矩阵组网完成！全线进入并发自动巡航模式。")
+        # 主线程在此挂起，守护以上四个并发任务
+        await asyncio.gather(
+            tester_task,
+            fetch_task,
+            im_ai_task,
+            email_ai_task
+        )
 
-    except KeyboardInterrupt:
-        # 4. 拦截 Ctrl+C 或 Docker stop 信号
-        logger.warning("\n⚠️ 接收到退出指令 (KeyboardInterrupt)！准备优雅停机...")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.warning("\n⚠️ 接收到物理级退出指令！准备优雅停机...")
 
-        # 第一步：按下全局停止按钮，通知所有引擎准备下线
+        # 按下全局停止按钮
         stop_event.set()
-
-        # 💥 架构师细节：必须同时按下数据唤醒按钮！
-        # 因为 AI 引擎此时可能正在死等 new_data_event 唤醒。
-        # 按下它，让 AI 瞬间醒来，从而立刻查看到 stop_event 已亮起，光速安全下线。
+        # 顺便按下唤醒按钮，防止有的引擎在死等新数据时卡住
         new_data_event.set()
 
-        logger.info("正在等待所有引擎完成手头的数据库收尾工作 (请勿强退)...")
+        logger.info("正在回收所有资源并等待数据库收尾工作...")
 
-        # 等待所有任务安全退出，保证不产生任何数据库脏数据
-        await asyncio.gather(tester_task, fetch_task, ai_task)
+        # 取消新版 AI 任务（因为它们是死循环，需要手动 cancel）
+        im_ai_task.cancel()
+        email_ai_task.cancel()
 
-        logger.info("🛑 所有后台引擎已安全切断电源。Goodbye!")
+        # 等待所有战将安全撤离
+        await asyncio.gather(
+            tester_task,
+            fetch_task,
+            im_ai_task,
+            email_ai_task,
+            return_exceptions=True
+        )
+
+        logger.info("🛑 矩阵电源已切断。Goodbye!")
         sys.exit(0)
 
 
 if __name__ == "__main__":
-    # 启动异步宇宙
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # 兜底捕获，防止 Python 抛出刺眼的报错堆栈
         pass

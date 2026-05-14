@@ -5,7 +5,7 @@ from typing_extensions import Annotated
 from datetime import datetime
 
 # --------------------------------------------------------------------------
-# 0. 基础交互模型 (Atomic Models)
+# 0. 原子化的小功能交互模型 (Atomic Models)
 # --------------------------------------------------------------------------
 
 class AccountToggle(BaseModel):
@@ -27,7 +27,6 @@ class EmailConfig(BaseModel):
 class InstagramConfig(BaseModel):
     """
     Instagram (Meta Graph API) 配置
-    💥 [核心修复]：显式定义 access_token，防止 Pydantic 在数据入库前进行安全过滤
     """
     access_token: str  # Meta 长期访问令牌 (必备)
     proxy_url: Optional[str] = None
@@ -39,7 +38,7 @@ class WhatsAppConfig(BaseModel):
 
 
 # --------------------------------------------------------------------------
-# 2. 更新专用配置图纸 (Update Configs - All Optional)
+# 2. 更新账号配置专用图纸 (Update Configs - All Optional)
 # --------------------------------------------------------------------------
 
 class EmailConfigUpdate(BaseModel):
@@ -125,8 +124,8 @@ AccountUpdate = Annotated[
 
 class AccountResponse(BaseModel):
     """
-    回显给前端的标准模型
-    包含数据库主键 ID 及由后端探针维护的 is_valid 状态
+    暴露给前端的账号模型
+    包括：id，账号平台唯一id，平台，用户名，可用性，是否激活，具体设置，创建时间。
     """
     id: int
     platform_account_id: str
