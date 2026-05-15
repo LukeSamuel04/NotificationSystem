@@ -1,86 +1,33 @@
-import { BrowserRouter as Router, Routes, Route, NavLink, Navigate } from 'react-router-dom';
-import './App.css';
-import DashboardPage from './pages/DashboardPage.tsx';
-import HistoryPage from './pages/HistoryPage';
-// 💥 1. 新增：引入账号设置页面
-import AccountSettingPage from './pages/AccountSettingPage';
-// 💥 2. 新增：引入 Settings 图标
-import { LayoutDashboard, Archive, Settings } from 'lucide-react';
+// src/App.tsx
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { MainLayout } from "./components/layout/MainLayout";
+import AccountDashboard from "./pages/AccountDashboard";
+import NotificationInbox from "./pages/NotificationInbox";
+import PreferenceSettings from "./pages/PreferenceSettings"; // 💥 引入刚刚写好的偏好设置页面
 
 function App() {
   return (
-    <Router>
-      <div className="app-container" style={{ display: 'flex', height: '100vh', backgroundColor: '#f8fafc', overflow: 'hidden' }}>
+    <BrowserRouter>
+      {/* Layout 包裹 Routes 实现了侧边栏的持久挂载 */}
+      <MainLayout>
+        <Routes>
+          {/* 自动重定向 */}
+          <Route path="/" element={<Navigate to="/accounts" replace />} />
 
-        {/* ================= 左侧全局导航栏 ================= */}
-        <aside style={{
-          width: '80px', backgroundColor: '#1e293b', display: 'flex',
-          flexDirection: 'column', alignItems: 'center', padding: '20px 0', gap: '30px',
-          flexShrink: 0,
-          boxShadow: '2px 0 10px rgba(0,0,0,0.1)', zIndex: 10
-        }}>
-          {/* LOGO */}
-          <div style={{ color: 'white', marginBottom: '10px' }}>
-            <div style={{ width: '40px', height: '40px', backgroundColor: '#3b82f6', borderRadius: '10px', display: 'flex', justifyContent: 'center', alignItems: 'center', fontWeight: 'bold', fontSize: '18px', boxShadow: '0 4px 6px rgba(59, 130, 246, 0.3)' }}>
-              NS
-            </div>
-          </div>
+          {/* 账号设置页面 */}
+          <Route path="/accounts" element={<AccountDashboard />} />
 
-          {/* 看板路由按钮 */}
-          <NavLink
-            to="/kanban"
-            style={({ isActive }) => ({
-              color: isActive ? '#3b82f6' : '#94a3b8',
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px',
-              textDecoration: 'none', fontSize: '12px', transition: 'color 0.2s', fontWeight: isActive ? 'bold' : 'normal'
-            })}
-          >
-            <LayoutDashboard size={24} />
-            <span>Kanban</span>
-          </NavLink>
+          {/* 消息看板页面 */}
+          <Route path="/inbox" element={<NotificationInbox />} />
 
-          {/* 历史路由按钮 */}
-          <NavLink
-            to="/history"
-            style={({ isActive }) => ({
-              color: isActive ? '#3b82f6' : '#94a3b8',
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px',
-              textDecoration: 'none', fontSize: '12px', transition: 'color 0.2s', fontWeight: isActive ? 'bold' : 'normal'
-            })}
-          >
-            <Archive size={24} />
-            <span>History</span>
-          </NavLink>
+          {/* 💥 评分规则页面：正式挂载 */}
+          <Route path="/rules" element={<PreferenceSettings />} />
 
-          {/* 💥 3. 新增：账号设置路由按钮 */}
-          <NavLink
-            to="/accounts"
-            style={({ isActive }) => ({
-              color: isActive ? '#3b82f6' : '#94a3b8',
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px',
-              textDecoration: 'none', fontSize: '12px', transition: 'color 0.2s', fontWeight: isActive ? 'bold' : 'normal'
-            })}
-          >
-            <Settings size={24} />
-            <span>Accounts</span>
-          </NavLink>
-        </aside>
-
-        {/* ================= 右侧动态视图区 ================= */}
-        <main style={{ flex: 1, position: 'relative' }}>
-          <Routes>
-            {/* 优化：访问根目录时自动重定向到 Kanban */}
-            <Route path="/" element={<Navigate to="/kanban" replace />} />
-
-            <Route path="/kanban" element={<DashboardPage />} />
-            <Route path="/history" element={<HistoryPage />} />
-            {/* 💥 4. 新增：注册账号设置组件的路由 */}
-            <Route path="/accounts" element={<AccountSettingPage />} />
-          </Routes>
-        </main>
-
-      </div>
-    </Router>
+          {/* 未来扩展页面 */}
+          <Route path="/settings" element={<div className="p-8">系统设置开发中...</div>} />
+        </Routes>
+      </MainLayout>
+    </BrowserRouter>
   );
 }
 

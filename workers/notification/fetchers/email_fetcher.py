@@ -28,16 +28,32 @@ class EmailFetcher(BaseFetcher):
 
     async def test_connection(self) -> bool:
         print(f"🔄 [异步探针] 正在验证邮箱账号: {self.user} ...")
+        client = None
         try:
             client = aioimaplib.IMAP4_SSL(host=self.host)
             await client.wait_hello_from_server()
-            await client.login(self.user, self.password)
-            await client.logout()
-            print("✅ 邮箱验证通过！")
-            return True
+
+            # 💥 核心修复：捕获响应对象并检查认证结果
+            response = await client.login(self.user, self.password)
+
+            if response.result == 'OK':
+                print(f"✅ 邮箱验证通过: {self.user}")
+                await client.logout()
+                return True
+            else:
+                # 专门拦截 163 等返回 NO 但不抛出异常的情况
+                print(f"❌ 邮箱验证失败 ({response.result}): {response.lines}")
+                return False
         except Exception as e:
-            print(f"❌ 邮箱验证失败: {e}")
+            print(f"❌ 邮箱验证发生异常: {e}")
             return False
+        finally:
+            # 确保无论成功失败都能安全关闭连接
+            if client:
+                try:
+                    await client.logout()
+                except:
+                    pass
 
     async def fetch_new(self) -> List[Dict[str, Any]]:
         messages = []

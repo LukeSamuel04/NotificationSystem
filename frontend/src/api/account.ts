@@ -1,28 +1,40 @@
 // src/api/account.ts
-import { apiClient } from '../services/http';
-import type { AccountCreatePayload, AccountResponse } from '../types/account';
+import { apiClient } from './client';
+import type {
+  AccountResponse,
+  AccountCreatePayload,
+  AccountUpdatePayload
+} from '../types/account';
 
+/**
+ * 账号资产 API 集合
+ * 对应后端的 /api/accounts 路由
+ */
 export const accountApi = {
-  // 获取所有绑定的账号列表
+  // 1. 获取所有绑定的账号列表
   getAccounts: async (): Promise<AccountResponse[]> => {
-    const { data } = await apiClient.get<AccountResponse[]>('/api/accounts/');
-    return data;
+    // apiClient 已经配置了 baseURL，所以这里直接写 '/' 即可
+    // 实际请求地址: GET http://localhost:8000/api/accounts/
+    return apiClient.get('/accounts/');
   },
 
-  // 新增绑定账号（触发后端防御性探针）
-  createAccount: async (payload: AccountCreatePayload): Promise<AccountResponse> => {
-    const { data } = await apiClient.post<AccountResponse>('/api/accounts/', payload);
-    return data;
+  // 2. 新增账号 (会触发后端探针验证)
+  createAccount: async (data: AccountCreatePayload): Promise<AccountResponse> => {
+    return apiClient.post('/accounts/', data);
   },
 
-  // 更新现有账号配置（触发重新验证）
-  updateAccount: async (id: number, payload: AccountCreatePayload): Promise<AccountResponse> => {
-    const { data } = await apiClient.put<AccountResponse>(`/api/accounts/${id}`, payload);
-    return data;
+  // 3. 更新账号 (增量更新，按需触发探针)
+  updateAccount: async (id: string, data: AccountUpdatePayload): Promise<AccountResponse> => {
+    return apiClient.put(`/accounts/${id}`, data);
   },
 
-  // 解除绑定账号
-  deleteAccount: async (id: number): Promise<void> => {
-    await apiClient.delete(`/api/accounts/${id}`);
+  // 4. 彻底删除账号并解绑 Meta 授权
+  deleteAccount: async (id: string): Promise<{ message: string }> => {
+    return apiClient.delete(`/accounts/${id}`);
+  },
+
+  // 5. 快速启用/停用开关 (不触发探针)
+  toggleAccount: async (id: string, isActive: boolean): Promise<AccountResponse> => {
+    return apiClient.patch(`/accounts/${id}/toggle`, { is_active: isActive });
   }
 };

@@ -1,99 +1,138 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from typing import List
+# app/api/endpoints/notifications.py
+import logging
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session, joinedload, contains_eager
+from sqlalchemy import func, case
 
 from app.db.session import get_db
-# 引入重构后的新模型
 from app.models.notifications import Notification
-from app.models.analysis import NotificationAnalysis
-from app.schemas.notification import NotificationResponse
+from app.models.email_analysis import EmailAnalysis
+from app.models.im_session import IMSessionState
+from app.models.analysis_payload import AnalysisPayload
+from app.schemas.notification import NotificationResponse, NotificationUpdate, FeedbackUpdate
 
-print('Notification endpoint is updated and active!')
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _format_notification_response(notif: Notification, analysis_record: NotificationAnalysis):
-    """
-    内部辅助函数：将主表与 AI 分析表的结果拍平。
-    注意：这里不再需要判断 content 还是 cleaned_content，因为主表现在只存洗干净的数据。
-    """
-    return {
-        "id": notif.id,
-        "account_id": notif.account_id,
-        "account_msg_id": notif.account_msg_id,
-        "sender": notif.sender,
-        "subject": notif.subject,
-        # 这里对应 Schema 中的 content 字段，Pydantic 会自动映射
-        "cleaned_content": notif.cleaned_content,
-        "status": notif.status,
-        "received_at": notif.received_at,
-        "created_at": notif.created_at,
-        "updated_at": notif.updated_at,
-        # AI 分析结果字段
-        "priority_score": analysis_record.priority_score if analysis_record else None,
-        "category": analysis_record.category if analysis_record else None,
-        "summary": analysis_record.summary if analysis_record else None,
-    }
+# ==========================================
+# 1. 核心看板列表接口 (大一统聚合器)
+# ==========================================
+@router.get("/", response_model=List[NotificationResponse])
+def get_notifications(
+        status: str = "processed",
+        account_id: Optional[str] = None,
+        is_read: Optional[bool] = None,
+        limit: int = 50,
+        offset: int = 0,
+        db: Session = Depends(get_db)
+):
+    # 1. 基础查询：只用 joinedload 挂载不需要用来排序的 payload
+    query = db.query(Notification).options(
+        joinedload(Notification.payload)
+    )
+
+    # 2. 基础过滤
+    query = query.filter(Notification.status == status)
+    if account_id:
+        query = query.filter(Notification.account_id == account_id)
+    if is_read is not None:
+        query = query.filter(Notification.is_read == is_read)
+
+    # 3. 💥 核心修复：直接通过“关系属性 (Relationship)”进行 Join
+    # 这样既能把数据取出来做排序，又能完美触发 contains_eager 把数据塞进对象里发给前端
+
+    # 挂载 Email 分析数据
+    query = query.outerjoin(Notification.email_analysis).options(
+        contains_eager(Notification.email_analysis)
+    )
+
+    # 挂载 IM 会话数据
+    query = query.outerjoin(Notification.im_session_state).options(
+        contains_eager(Notification.im_session_state)
+    )
+
+    # 4. 跨表优先级综合排序
+    query = query.order_by(
+        case(
+            (Notification.platform == "email", EmailAnalysis.priority_score),
+            (Notification.platform == "instagram", IMSessionState.priority_score),
+            else_=1
+        ).desc(),
+        Notification.received_at.desc()
+    )
+
+    return query.offset(offset).limit(limit).all()
 
 
-@router.get("/unsolved", response_model=List[NotificationResponse])
-def get_kanban_notifications(db: Session = Depends(get_db)):
-    """获取看板上的未处理消息（高分优先）"""
-    # 使用更加严谨的联表查询
-    results = db.query(
-        Notification,
-        NotificationAnalysis
-    ).outerjoin(
-        NotificationAnalysis,
-        Notification.id == NotificationAnalysis.notification_id
-    ).filter(
-        Notification.status == 'unread' # 如果你的 worker 把状态改成了 pending，这里也要对应修改
-    ).order_by(
-        NotificationAnalysis.priority_score.desc()
-    ).all()
-
-    return [_format_notification_response(notif, analysis_record) for notif, analysis_record in results]
-
-
-@router.get("/history", response_model=List[NotificationResponse])
-def get_history_notifications(db: Session = Depends(get_db)):
-    """获取已归档的历史消息"""
-    results = db.query(
-        Notification,
-        NotificationAnalysis
-    ).outerjoin(
-        NotificationAnalysis,
-        Notification.id == NotificationAnalysis.notification_id
-    ).filter(
-        Notification.status == 'done'
-    ).order_by(
-        Notification.id.desc()
-    ).all()
-
-    return [_format_notification_response(notif, analysis_record) for notif, analysis_record in results]
-
-
-@router.patch("/{notif_id}/done")
-def mark_as_done(notif_id: int, db: Session = Depends(get_db)):
-    """将消息标记为已处理（归档）"""
-    notif = db.query(Notification).filter(Notification.id == notif_id).first()
-
+# ==========================================
+# 2. 局部更新接口 (状态流转 & 红点消除)
+# ==========================================
+@router.patch("/{notification_id}", response_model=NotificationResponse)
+def update_notification(
+        notification_id: int,
+        payload: NotificationUpdate,
+        db: Session = Depends(get_db)
+):
+    notif = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notif:
-        raise HTTPException(status_code=404, detail="Notification not found")
+        raise HTTPException(status_code=404, detail="通知未找到")
 
-    notif.status = 'done'
+    update_data = payload.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(notif, field, value)
+
+    # 特殊联动：如果 IM 消息被标记为已读，同步更新 IM 会话状态表的红点
+    if notif.platform == "instagram" and payload.is_read is True:
+        session = db.query(IMSessionState).filter_by(
+            external_sender_id=notif.external_sender_id,
+            account_id=notif.account_id
+        ).first()
+        if session:
+            session.is_read = True
+
     db.commit()
-    return {"message": "Success", "id": notif_id}
+    db.refresh(notif)
+    return notif
 
 
-@router.patch("/{notif_id}/restore")
-def restore_notification(notif_id: int, db: Session = Depends(get_db)):
-    """从历史记录中恢复消息到看板"""
-    notif = db.query(Notification).filter(Notification.id == notif_id).first()
+# ==========================================
+# 3. 反馈飞轮接口 (人类干预算分)
+# ==========================================
+@router.patch("/{notification_id}/feedback")
+def submit_feedback(
+        notification_id: int,
+        feedback: FeedbackUpdate,
+        db: Session = Depends(get_db)
+):
+    payload = db.query(AnalysisPayload).filter_by(notification_id=notification_id).first()
+    if not payload:
+        raise HTTPException(status_code=404, detail="该通知暂无算法快照数据，无法提交反馈")
 
-    if not notif:
-        raise HTTPException(status_code=404, detail="Notification not found")
-
-    notif.status = 'unread'
+    payload.user_feedback_score = feedback.user_feedback_score
     db.commit()
-    return {"message": "Restored", "id": notif_id}
+
+    logger.info(f"🎯 收到用户反馈：通知 {notification_id} 被标记为 {feedback.user_feedback_score} 分")
+    return {"status": "success", "message": "已成功拦截反馈，训练集已更新"}
+
+
+# ==========================================
+# 4. 批量已读 (用户体验增强)
+# ==========================================
+@router.post("/mark-all-read/{account_id}")
+def mark_all_as_read(account_id: str, db: Session = Depends(get_db)):
+    # 1. 更新原子消息表
+    db.query(Notification).filter(
+        Notification.account_id == account_id,
+        Notification.is_read == False
+    ).update({"is_read": True})
+
+    # 2. 更新 IM 聚合会话表
+    db.query(IMSessionState).filter(
+        IMSessionState.account_id == account_id,
+        IMSessionState.is_read == False
+    ).update({"is_read": True})
+
+    db.commit()
+    return {"status": "success", "count": "all"}

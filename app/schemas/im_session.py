@@ -35,7 +35,7 @@ class IMSessionStateResponse(IMSessionAIResult):
     包含了所有数据库字段。
     """
     external_sender_id: str
-    account_id: int
+    account_id: str
     platform: str
     last_message_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

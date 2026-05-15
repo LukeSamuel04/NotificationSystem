@@ -6,8 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from app.api.webhooks.instagram_hook import router as instagram_router
-# 路由导入
-from app.api.endpoints import accounts, notifications
+
+# 💥 核心修复 1：在这里导入 preference 模块
+from app.api.endpoints import accounts, notifications, preference
 
 
 # ==========================================
@@ -90,7 +91,12 @@ async def validation_exception_handler(request, exc):
 # ==========================================
 app.include_router(accounts.router, prefix="/api/accounts", tags=["账号管理"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
+
+# 💥 核心修复 2：将 preference 正式挂载到主程序，前缀定为 /api/preferences
+app.include_router(preference.router, prefix="/api/preferences", tags=["Preferences"])
+
 app.include_router(instagram_router, prefix="/api/webhooks", tags=["Webhooks"])
+
 
 @app.get("/", include_in_schema=False)
 async def root():

@@ -1,5 +1,5 @@
 # app/models/im_session.py
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, func
+from sqlalchemy import Column, String, Integer, Float, Text, DateTime, func, Boolean
 from app.db.base_class import Base
 
 
@@ -9,7 +9,8 @@ class IMSessionState(Base):
     # 联合主键
     external_sender_id = Column(String(255), primary_key=True, index=True, comment="外部联系人 ID")
     account_id = Column(String(255), primary_key=True, index=True, comment="系统接收账号 ID")
-
+    # 💥 聚合状态：整个窗口是否有未读
+    is_read = Column(Boolean, default=False, index=True)
     platform = Column(String(50), index=True, comment="所属平台 (如 instagram)")
     current_topic = Column(String(255), comment="当前核心诉求/话题")
     priority_score = Column(Integer, comment="紧急度评分 1-10")

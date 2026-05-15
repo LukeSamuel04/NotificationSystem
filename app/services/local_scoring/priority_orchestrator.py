@@ -99,6 +99,10 @@ class PriorityOrchestrator:
             if session:
                 session.priority_score = final_score
                 session.current_topic = current_topic
+
+                # 💥 核心新增：只要有新消息被 AI 处理并更新分数，必须强制点亮该会话的红点！
+                session.is_read = False
+
                 # 注意：Session 级别的更新会被最新的消息评分覆盖，而冷表记录了每一次计算
 
         return {

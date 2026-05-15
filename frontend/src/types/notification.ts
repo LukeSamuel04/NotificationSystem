@@ -1,22 +1,76 @@
 // src/types/notification.ts
 
-export interface AppNotification {
-  // === 原始消息字段 (来自 raw_notifications 表) ===
+export interface AnalysisPayloadResponse {
   id: number;
-  account_id: number;        // [新增] 关联的抓取账号ID
-  account_msg_id: string;    // [新增] 平台原本的消息ID (去重用)
-  sender: string;
-  subject: string;
-  cleaned_content: string;           // [修改] 截图里叫 content，原来叫 raw_content
-  status: 'unread' | 'read' | 'done';
-  // === 时间戳字段 ===
-  received_at?: string;
-  created_at?: string;
-  updated_at?: string;  // [新增]
-  // === AI 分析字段 (来自 notification_analysis 表) ===
-  // 注意：这里我加了 `?` (可选属性)。
-  // 因为消息刚抓取时，AI 可能还没打分，这些字段可能是 null 或 undefined
-  priority_score?: number;   // 优先级评分
-  category?: string;         // 分类
-  summary?: string;          // [新增] AI 生成的摘要
+  analysis_data: Record<string, any>;
+  user_feedback_score?: number | null;
+}
+
+export interface EmailAnalysisResponse {
+  id: number;
+  priority_score: number;
+  summary?: string;
+  category?: string;
+  category_id?: number;
+}
+
+export interface IMSessionStateResponse {
+  priority_score: number;
+  current_topic?: string;      // 💥 对齐后端真实字段
+  summary_snapshot?: string;   // 💥 对齐后端真实字段
+  is_read?: boolean;
+}
+
+export interface NotificationResponse {
+  id: number;
+  account_id: number;
+  platform: 'email' | 'instagram';
+  account_msg_id: string;
+  status: string;
+
+  sender?: string | null;
+  external_sender_id?: string | null;
+  subject?: string | null;
+  cleaned_content?: string | null;
+
+  is_from_me: boolean;
+  reply_to_mid?: string | null;
+  is_read?: boolean;
+
+  email_analysis?: EmailAnalysisResponse | null;
+  im_session_state?: IMSessionStateResponse | null; // 💥 核心修复：更正为真实的后端返回键名
+  analysis_payload?: AnalysisPayloadResponse | null;
+
+  received_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface GetNotificationsParams {
+  status?: string;
+  account_id?: string;
+  is_read?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface NotificationUpdatePayload {
+  status?: string;
+  is_read?: boolean;
+}
+
+export interface FeedbackUpdatePayload {
+  user_feedback_score: number;
+}
+
+export interface GroupedNotification {
+  id: string;
+  platform: 'email' | 'instagram';
+  account_id: number;
+  external_sender_id?: string | null;
+  messages: NotificationResponse[];
+  latest_received_at: string;
+  priority_score: number;
+  title: string;
+  is_read: boolean;
 }

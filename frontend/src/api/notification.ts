@@ -1,37 +1,37 @@
 // src/api/notification.ts
-import { apiClient } from '../services/http';
-import type { AppNotification } from '../types'; // 引入我们写好的类型图纸
+import { apiClient } from './client';
+import type {
+  NotificationResponse,
+  GetNotificationsParams,
+  NotificationUpdatePayload,
+  FeedbackUpdatePayload
+} from '../types/notification';
 
+/**
+ * AI 优先级看板 API 集合
+ * 对应后端的 /api/notifications 路由
+ */
 export const notificationApi = {
-  // 提交手动录入的消息
-  // 注意：入参里的 raw_content 已经根据你的新数据库改成了 content
-  collect: async (payload: { sender: string; subject: string; content: string }) => {
-    // 假设你的 collect 接口也迁移到了这个 prefix 下
-    const { data } = await apiClient.post('/api/notifications/collect', payload);
-    return data;
+  // 1. 核心看板列表接口 (大一统聚合器)
+  getNotifications: async (params?: GetNotificationsParams): Promise<NotificationResponse[]> => {
+    // GET /notifications/?status=processed&limit=50
+    return apiClient.get('/notifications/', { params });
   },
 
-  // 获取看板未处理消息列表 (对接后端的 /unsolved)
-  getNotifications: async (): Promise<AppNotification[]> => {
-    const { data } = await apiClient.get<AppNotification[]>('/api/notifications/unsolved');
-    return data;
+  // 2. 局部更新接口 (状态流转 & 红点消除)
+  // 支持标记已读、拖拽归档
+  updateNotification: async (id: number, data: NotificationUpdatePayload): Promise<NotificationResponse> => {
+    return apiClient.patch(`/notifications/${id}`, data);
   },
 
-  // 获取历史记录列表
-  getHistory: async (): Promise<AppNotification[]> => {
-    const { data } = await apiClient.get<AppNotification[]>('/api/notifications/history');
-    return data;
+  // 3. 反馈飞轮接口 (人类干预算分)
+  submitFeedback: async (id: number, score: number): Promise<{ status: string; message: string }> => {
+    const payload: FeedbackUpdatePayload = { user_feedback_score: score };
+    return apiClient.patch(`/notifications/${id}/feedback`, payload);
   },
 
-  // 标记消息为已处理
-  markAsDone: async (id: number) => {
-    const { data } = await apiClient.patch(`/api/notifications/${id}/done`);
-    return data;
-  },
-
-  // 从历史记录中恢复消息
-  restoreNotification: async (id: number) => {
-    const { data } = await apiClient.patch(`/api/notifications/${id}/restore`);
-    return data;
+  // 4. 批量已读 (用户体验增强)
+  markAllAsRead: async (accountId: string): Promise<{ status: string; count: string }> => {
+    return apiClient.post(`/notifications/mark-all-read/${accountId}`);
   }
 };

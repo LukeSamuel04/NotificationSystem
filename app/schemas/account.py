@@ -134,7 +134,7 @@ class AccountResponse(BaseModel):
     is_valid: bool   # 探针验证结果：True 表示连通性正常
     is_active: bool  # 用户手动开关：True 表示允许巡检
     config: Dict[str, Any]  # 以字典形式返回配置（脱敏逻辑建议在应用层处理）
-    created_at: Optional[datetime] = None
+    #created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True  # 允许从 SQLAlchemy 模型对象直接转换

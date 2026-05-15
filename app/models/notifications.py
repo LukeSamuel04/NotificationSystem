@@ -24,8 +24,9 @@ class Notification(Base):
 
     #删除了生数据，只保留清洗后的 Markdown/纯文本
     cleaned_content = Column(Text, nullable=True)
-
-    status = Column(String(50), default="pending")
+    status = Column(String, default="pending", index=True)
+    is_read = Column(Boolean, default=False, index=True)
+    #status = Column(String(50), default="pending")
     #是否是我主动发出的
     is_from_me = Column(Boolean, default=False, index=True)
     #记录被回复的消息 ID
@@ -59,4 +60,13 @@ class Notification(Base):
         back_populates="notification",
         uselist=False,
         cascade="all, delete-orphan"
+    )
+
+    # 4. 💥 核心修复：IM Session 虚拟关联映射
+    # 由于 IM 会话是由两个字段联合确认的，且没有物理外键约束，这里使用 primaryjoin 手动寻址
+    im_session_state = relationship(
+        "IMSessionState",
+        primaryjoin="and_(Notification.account_id == foreign(IMSessionState.account_id), Notification.external_sender_id == foreign(IMSessionState.external_sender_id))",
+        uselist=False,
+        viewonly=True  # 设为只读，避免在这个模型里意外修改 IM 的独立状态
     )
