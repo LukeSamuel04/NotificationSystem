@@ -31,7 +31,6 @@ def _mask_account(account: FetchAccount) -> AccountResponse:
         "username": account.username,
         "is_valid": account.is_valid,
         "is_active": account.is_active,
-        #"created_at": account.created_at,
         "config": {}
     }
 
@@ -63,7 +62,6 @@ def _mask_account(account: FetchAccount) -> AccountResponse:
 def get_accounts(db: Session = Depends(get_db)):
     """获取所有账号，用于前端 Dashboard 的状态展示"""
     accounts = db.query(FetchAccount).all()
-    # 💥 必须套上脱敏遮罩
     return [_mask_account(acc) for acc in accounts]
 
 
@@ -78,7 +76,6 @@ async def create_account(account_in: AccountCreate, db: Session = Depends(get_db
     2. 调用第三方平台探针进行“真伪/存活”验证
     3. 验证通过后持久化到数据库
     """
-    # 1. 唯一性查重
     existing_acc = db.query(FetchAccount).filter(
         FetchAccount.platform == account_in.platform,
         FetchAccount.platform_account_id == account_in.platform_account_id
@@ -87,13 +84,9 @@ async def create_account(account_in: AccountCreate, db: Session = Depends(get_db
     if existing_acc:
         raise HTTPException(status_code=400, detail="该外部账号 ID 已经绑定过了！")
 
-    # 2. 准备配置字典
-    config_dict = account_in.config.model_dump() if hasattr(account_in.config,
-                                                            'model_dump') else account_in.config.dict()
+    config_dict = account_in.config.model_dump() if hasattr(account_in, 'model_dump') else account_in.config.dict()
 
-    # 3. 关键点：强验证拦截
     if account_in.platform == "email":
-        # 💥 修正：使用 platform_account_id (真实邮箱) 作为验证账号
         test_config = {**config_dict, "user": account_in.platform_account_id}
         if not await EmailFetcher(test_config).test_connection():
             raise HTTPException(status_code=400, detail="邮件服务器连接失败，请检查 Host 或授权码。")
@@ -108,7 +101,6 @@ async def create_account(account_in: AccountCreate, db: Session = Depends(get_db
             raise HTTPException(status_code=400, detail="Instagram 令牌或 ID 无效，Meta 拒绝连接。")
         logger.info(f"✅ Instagram 验证通过，准许入库: {account_in.username}")
 
-    # 4. 实例化模型并持久化
     new_account = FetchAccount(
         platform=account_in.platform,
         platform_account_id=account_in.platform_account_id,
@@ -125,11 +117,11 @@ async def create_account(account_in: AccountCreate, db: Session = Depends(get_db
 
 
 # ==========================================
-# 3. 更新账号 (逻辑合并 + 二次验证)
+# 3. 更新账号 (💥 方案 2 鲁棒性升级版)
 # ==========================================
 @router.put("/{account_id}", response_model=AccountResponse)
 async def update_account(account_id: str, account_in: AccountUpdate, db: Session = Depends(get_db)):
-    """更新账号：支持增量配置合并，并对变更后的配置重新发起探针"""
+    """更新账号：支持增量配置合并，并对变更后的配置无视状态强制重新发起探针"""
     account = db.query(FetchAccount).filter(FetchAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -143,28 +135,39 @@ async def update_account(account_id: str, account_in: AccountUpdate, db: Session
         merged_config = {**current_config, **update_data["config"]}
         update_data["config"] = merged_config
 
-    # B. 如果账号是开启状态，且关键配置发生了变化，必须重新验证
-    is_active_now = update_data.get("is_active", account.is_active)
-    if is_active_now and "config" in update_data:
+    # 💥 B. 核心修复：重新构建探针校验的触发边界 (方案 2)
+    # 只要满足以下任一条件，后端必须无条件启动 EmailFetcher 探针：
+    # 条件 1：用户修改了敏感配置（如密码授权码、Token改变）-> 必须验真新配置
+    # 条件 2：用户试图将账号状态从“禁用”切回“启用” -> 必须验真已有配置，确保能安全开启后台巡检
+    config_changed = "config" in update_data
+    activating = update_data.get("is_active") is True and not account.is_active
+
+    if config_changed or activating:
+        # 获取待测试的最终配置字典（如果改变了用合并后的，没变用数据库原有的）
+        config_to_test = update_data.get("config", account.config) or {}
+
         if account.platform == "email":
-            # 💥 修正：使用账号本身绑定的真实邮箱地址进行验证
-            test_config = {**update_data["config"], "user": account.platform_account_id}
+            test_config = {**config_to_test, "user": account.platform_account_id}
             if not await EmailFetcher(test_config).test_connection():
-                raise HTTPException(status_code=400, detail="更新失败：新邮件配置无法连接服务器。")
+                raise HTTPException(status_code=400, detail="更新失败：邮件服务器连接失败，请检查授权码或主机地址。")
 
         elif account.platform == "instagram":
             tester = InstagramAvailabilityTester(
                 meta_id=account.platform_account_id,
-                access_token=update_data["config"].get("access_token")
+                access_token=config_to_test.get("access_token")
             )
             if not await tester.test_connection():
-                raise HTTPException(status_code=400, detail="更新失败：新的 Instagram 令牌无效。")
+                raise HTTPException(status_code=400, detail="更新失败：Instagram 长期令牌或 Meta ID 校验失败。")
+
+        # 💥 只有真正走完上面且连接成功的安全请求，才有资格被标记为合法有效
+        account.is_valid = True
 
     # C. 执行字段映射与更新
     for field, value in update_data.items():
         setattr(account, field, value)
 
-    account.is_valid = True
+    # 💥 核心修复：移除了原本放在函数末尾的盲目 `account.is_valid = True`
+    # 如果用户仅仅是修改了无伤大雅的 `username`，账号可用性状态将保持原有状态不变
     db.commit()
     db.refresh(account)
 
@@ -172,7 +175,7 @@ async def update_account(account_id: str, account_in: AccountUpdate, db: Session
 
 
 # ==========================================
-# 4. 删除账号 (物理切断：不仅删库，还要拔线)
+# 4. 删除账号 (物理切断)
 # ==========================================
 @router.delete("/{account_id}")
 async def delete_account(account_id: str, db: Session = Depends(get_db)):

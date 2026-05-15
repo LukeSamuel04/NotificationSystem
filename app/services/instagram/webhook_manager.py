@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.account import FetchAccount
 from app.models.notifications import Notification
+from app.models.im_session import IMSessionState  # 💥 新增导入：引入 IM 聚合会话模型
 from app.schemas.notification import InstagramWebhookPayload
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ async def process_instagram_webhook(
         is_from_me: bool = False
 ):
     """
-    全量重构版：修正 external_sender_id 逻辑，确保存储的是“对话伙伴”的 ID
+    全量重构版：修正 external_sender_id 逻辑，并实现完整的“全局会话唤醒”闭环
     """
     # 1. 过滤空数据
     if not payload.entry or not payload.entry[0].messaging:
@@ -62,14 +63,12 @@ async def process_instagram_webhook(
             logger.warning(f"⚠️ 未绑定的 Meta ID: {meta_id}，消息已丢弃。")
             return
 
-        # 6. 写入数据库
+        # 6. 写入新消息到数据库
         new_notification = Notification(
             account_id=target_account.id,
             platform="instagram",
             account_msg_id=msg_id,
-            # 这里的 sender 只是给人看的标签
             sender="Me" if is_from_me else "IG User",
-            # 💥 关键点：external_sender_id 永远存客户 ID，方便后续根据此 ID 聚合上下文
             external_sender_id=chat_partner_id,
             cleaned_content=raw_text,
             is_from_me=is_from_me,
@@ -77,12 +76,30 @@ async def process_instagram_webhook(
             received_at=received_time,
             status="pending"
         )
-
         db.add(new_notification)
+
+        # 🚀 💥 7. 核心修复：全局会话唤醒 (Conversation Resurfacing)
+        # 将该客户的所有历史归档消息全部捞回 "processed" 状态，防止前端渲染时历史记录断层
+        db.query(Notification).filter(
+            Notification.account_id == target_account.id,
+            Notification.external_sender_id == chat_partner_id,
+            Notification.platform == "instagram",
+            Notification.status == "archived"
+        ).update({"status": "processed"}, synchronize_session=False)
+
+        # 🚀 💥 8. 聚合表状态唤醒：如果是对方发来的真实新消息，点亮全局未读红点
+        if not is_from_me:
+            # 注意：im_session_states 表中的 account_id 是 String 类型，所以需要转换
+            db.query(IMSessionState).filter(
+                IMSessionState.account_id == str(target_account.id),
+                IMSessionState.external_sender_id == chat_partner_id
+            ).update({"is_read": False}, synchronize_session=False)
+
+        # 统一提交所有更改
         db.commit()
 
         status_label = "我方回声" if is_from_me else "对方来信"
-        logger.info(f"✅ [{status_label}] 消息入库成功 (Partner: {chat_partner_id})")
+        logger.info(f"✅ [{status_label}] 消息入库成功并完成会话唤醒 (Partner: {chat_partner_id})")
 
     except Exception as e:
         db.rollback()

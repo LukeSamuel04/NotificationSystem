@@ -20,22 +20,29 @@ interface PreferenceTableProps {
   isLoading: boolean;
 }
 
-// 维度名称映射
 const TYPE_LABELS: Record<string, string> = {
   sender_id: "发件人 ID",
   topic: "话题关键词",
   email_domain: "邮件域名"
 };
 
+// 💥 同步弹窗的滑块视觉算法，确保证列表进度条的 50% 完美对应 1.0 分
+const toSliderValue = (actualVal: number) => {
+  if (actualVal <= 1.0) {
+    return actualVal * 50;
+  } else {
+    return 50 + ((actualVal - 1.0) / 9.0) * 50;
+  }
+};
+
 export function PreferenceTable({ preferences, onEdit, onDelete, isLoading }: PreferenceTableProps) {
 
-  // 根据权重因子计算颜色梯度的逻辑
   const getFactorColor = (factor: number) => {
-    if (factor === 0) return "bg-slate-300"; // 屏蔽
-    if (factor < 1) return "bg-blue-400";    // 降权
-    if (factor === 1) return "bg-green-400";  // 中性
-    if (factor < 5) return "bg-orange-400";   // 提权
-    return "bg-red-500";                      // 极高优
+    if (factor === 0) return "bg-slate-300";
+    if (factor < 1) return "bg-blue-400";
+    if (factor === 1) return "bg-green-400";
+    if (factor < 5) return "bg-orange-400";
+    return "bg-red-500";
   };
 
   if (!isLoading && preferences.length === 0) {
@@ -87,9 +94,9 @@ export function PreferenceTable({ preferences, onEdit, onDelete, isLoading }: Pr
                     <span>{pref.preference_factor === 0 ? "已屏蔽" : pref.preference_factor > 1 ? "提权" : "降权"}</span>
                   </div>
                   <Progress
-                    value={pref.preference_factor * 10}
+                    value={toSliderValue(pref.preference_factor)}
                     className="h-1.5"
-                    // @ts-ignore - 自定义颜色注入
+                    // @ts-ignore
                     indicatorClassName={getFactorColor(pref.preference_factor)}
                   />
                 </div>

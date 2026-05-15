@@ -28,9 +28,22 @@ interface PreferenceModalProps {
   onSave: (data: any) => Promise<void>;
   editingData: UserPreferenceResponse | null;
   accountId: string;
+  accountPlatform?: string;
 }
 
-export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountId }: PreferenceModalProps) {
+// 💥 滑块的真实值 (0-100) 转换为业务分值 (0.0 - 10.0)
+const toActualValue = (sliderVal: number) => {
+  if (sliderVal <= 50) return Number((sliderVal / 50).toFixed(1));
+  return Number((1.0 + ((sliderVal - 50) / 50) * 9.0).toFixed(1));
+};
+
+// 💥 业务分值 (0.0 - 10.0) 还原为滑块的真实值 (0-100)
+const toSliderValue = (actualVal: number) => {
+  if (actualVal <= 1.0) return actualVal * 50;
+  return 50 + ((actualVal - 1.0) / 9.0) * 50;
+};
+
+export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountId, accountPlatform }: PreferenceModalProps) {
   const [formData, setFormData] = useState<Partial<UserPreferenceBase>>({
     platform: "email",
     preference_type: "sender_id",
@@ -39,9 +52,8 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
   });
 
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null); // 💥 新增错误状态存储
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // 当进入编辑模式时，回填数据
   useEffect(() => {
     if (editingData) {
       setFormData({
@@ -51,15 +63,23 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
         preference_factor: editingData.preference_factor,
       });
     } else {
+      // 动态适配新建规则时的默认选中平台
+      let defaultPlatform = "global";
+      if (accountPlatform === "email" || accountPlatform === "instagram") {
+        defaultPlatform = accountPlatform;
+      } else if (!accountPlatform || accountPlatform === "all") {
+        defaultPlatform = "email";
+      }
+
       setFormData({
-        platform: "email",
+        platform: defaultPlatform as "email" | "instagram" | "global",
         preference_type: "sender_id",
         target_value: "",
         preference_factor: 1.0,
       });
     }
-    setErrorMsg(null); // 每次打开弹窗清空错误
-  }, [editingData, isOpen]);
+    setErrorMsg(null);
+  }, [editingData, isOpen, accountPlatform]);
 
   const handleSubmit = async () => {
     if (!formData.target_value) {
@@ -67,13 +87,12 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
       return;
     }
     setIsSubmitting(true);
-    setErrorMsg(null); // 提交前清空旧报错
+    setErrorMsg(null);
     try {
       await onSave({ ...formData, account_id: accountId });
       onClose();
     } catch (error: any) {
       console.error("保存规则失败", error);
-      // 💥 拦截 Axios 错误，提取后端 FastAPI 吐出的详情并显示在 UI 上
       const backendMsg = error.response?.data?.detail || error.message || "请求后端失败，请检查网络";
       setErrorMsg(typeof backendMsg === 'string' ? backendMsg : JSON.stringify(backendMsg));
     } finally {
@@ -92,7 +111,6 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
         </DialogHeader>
 
         <div className="grid gap-6 py-4">
-          {/* 💥 错误提示条：有报错时自动出现 */}
           {errorMsg && (
             <div className="flex items-start gap-2 p-3 text-sm text-red-600 bg-red-50 rounded-md border border-red-100">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -100,7 +118,6 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
             </div>
           )}
 
-          {/* 平台选择 */}
           <div className="grid gap-2">
             <Label>作用平台</Label>
             <Select
@@ -112,14 +129,18 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
                 <SelectValue placeholder="选择平台" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="email">Email (邮件)</SelectItem>
-                <SelectItem value="instagram">Instagram (消息)</SelectItem>
+                {/* 💥 核心修复：如果在 Email 账号下，直接把 Instagram 选项物理移除！ */}
+                {accountPlatform !== "instagram" && (
+                  <SelectItem value="email">Email (邮件)</SelectItem>
+                )}
+                {accountPlatform !== "email" && (
+                  <SelectItem value="instagram">Instagram (消息)</SelectItem>
+                )}
                 <SelectItem value="global">Global (全平台通用)</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
-          {/* 维度选择 */}
           <div className="grid gap-2">
             <Label>匹配维度</Label>
             <Select
@@ -138,7 +159,6 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
             </Select>
           </div>
 
-          {/* 目标值 */}
           <div className="grid gap-2">
             <Label>目标匹配值</Label>
             <Input
@@ -148,7 +168,6 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
             />
           </div>
 
-          {/* 权重因子滑动条 */}
           <div className="grid gap-4">
             <div className="flex justify-between items-center">
               <Label>权重因子系数</Label>
@@ -156,13 +175,14 @@ export function PreferenceModal({ isOpen, onClose, onSave, editingData, accountI
                 {formData.preference_factor?.toFixed(1)}x
               </span>
             </div>
+            {/* 💥 核心修复：底层走 0-100，利用映射算法计算出完美的中间值 */}
             <Slider
-              value={[formData.preference_factor || 1.0]}
-              max={10}
-              step={0.1}
-              onValueChange={(vals) => setFormData({...formData, preference_factor: vals[0]})}
+              value={[toSliderValue(formData.preference_factor ?? 1.0)]}
+              max={100}
+              step={1}
+              onValueChange={(vals) => setFormData({...formData, preference_factor: toActualValue(vals[0])})}
             />
-            <div className="flex justify-between text-[10px] text-slate-400 px-1">
+            <div className="flex justify-between text-[10px] text-slate-400 px-1 mt-1">
               <span>屏蔽 (0.0)</span>
               <span>默认 (1.0)</span>
               <span>极紧急 (10.0)</span>
