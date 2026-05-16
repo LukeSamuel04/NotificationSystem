@@ -1,4 +1,4 @@
-# tests/tests_after_developing/7_availability_tester_manager.py
+# workers/notification/fetchers/email_fetcher.py
 import email
 import re
 import uuid
@@ -15,6 +15,7 @@ class EmailFetcher(BaseFetcher):
     """
     基于原生异步 (Asyncio + aioimaplib) 的极速邮件抓取引擎。
     完美适配 QQ 邮箱严格 LIST 语法、物理即时打标与双向对话流闭环。
+    已彻底修复 GBK/GB2312 中文乱码与 Base64 MIME 头部解析天坑。
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -26,6 +27,30 @@ class EmailFetcher(BaseFetcher):
         except KeyError as e:
             raise ValueError(f"初始化 EmailFetcher 失败，缺少必要的配置项: {e}")
 
+    # ==========================================
+    # 💥 核心修复一：专门对付乱码的头部解码器
+    # ==========================================
+    def _decode_mail_header(self, header_text: str) -> str:
+        """专门处理 =?GBK?B?...?= 这种邮件头部复杂编码"""
+        if not header_text:
+            return ""
+        decoded_fragments = decode_header(header_text)
+        header_str = ""
+        for fragment, charset in decoded_fragments:
+            if isinstance(fragment, bytes):
+                # 国内邮箱经常标称 gb2312，但实际上包含 gbk 扩展字符 (如各种生僻字)
+                charset = charset or 'utf-8'
+                if charset.lower() == 'gb2312':
+                    charset = 'gbk'
+                try:
+                    header_str += fragment.decode(charset, errors='replace')
+                except Exception:
+                    # 兜底强解
+                    header_str += fragment.decode('utf-8', errors='replace')
+            else:
+                header_str += str(fragment)
+        return header_str
+
     async def test_connection(self) -> bool:
         print(f"🔄 [异步探针] 正在验证邮箱账号: {self.user} ...")
         client = None
@@ -33,22 +58,18 @@ class EmailFetcher(BaseFetcher):
             client = aioimaplib.IMAP4_SSL(host=self.host)
             await client.wait_hello_from_server()
 
-            # 💥 核心修复：捕获响应对象并检查认证结果
             response = await client.login(self.user, self.password)
 
             if response.result == 'OK':
                 print(f"✅ 邮箱验证通过: {self.user}")
-                # 💥 核心净化：移除了多余的独立 logout 调用，交给下面的 finally 统一闭环释放，防止二次注销
                 return True
             else:
-                # 专门拦截 163 等返回 NO 但不抛出异常的情况
                 print(f"❌ 邮箱验证失败 ({response.result}): {response.lines}")
                 return False
         except Exception as e:
             print(f"❌ 邮箱验证发生异常: {e}")
             return False
         finally:
-            # 确保无论成功失败都能安全关闭连接
             if client:
                 try:
                     await client.logout()
@@ -64,18 +85,15 @@ class EmailFetcher(BaseFetcher):
             await client.wait_hello_from_server()
             await client.login(self.user, self.password)
 
-            # 💥 终极修复：注入带实体引号的字面量参数，完美攻克 QQ 邮箱 BAD 响应壁垒
             status, folder_list = await client.list('""', '"*"')
             available_folders = [f.decode(errors="ignore") for f in folder_list] if status == "OK" else []
 
             target_folders = ["INBOX"]
 
-            # 精准提取真实的 Sent 文件夹名称
             sent_folder_name = None
             for raw_folder_str in available_folders:
                 folder_lower = raw_folder_str.lower()
                 if any(key in folder_lower for key in ["sent", "已发送", "sent messages"]):
-                    # 提取末尾双引号内的确切物理路径名称
                     match = re.search(r'"([^"]+)"$', raw_folder_str)
                     if match:
                         sent_folder_name = match.group(1)
@@ -89,16 +107,13 @@ class EmailFetcher(BaseFetcher):
             else:
                 print("⚠️ 未能匹配到发件箱目录，保留收件箱单行道收取。")
 
-            # 遍历目标文件夹逐个收取
             for folder in target_folders:
-                # 带有空格的文件夹（如 Sent Messages）必须用双引号包裹 select
                 await client.select(f'"{folder}"')
 
                 if folder == "INBOX":
                     status, response = await client.search('UNSEEN')
                     email_ids = response[0].split() if status == "OK" and response[0] else []
                 else:
-                    # 针对发件箱拉取最后 20 封信件索引，用于构建熟肉上下文
                     status, response = await client.search('ALL')
                     email_ids = response[0].split()[-20:] if status == "OK" and response[0] else []
 
@@ -115,7 +130,11 @@ class EmailFetcher(BaseFetcher):
                         raw_msg_id = msg.get("Message-ID", "")
                         account_msg_id = raw_msg_id.strip("<>") if raw_msg_id else f"no_id_{uuid.uuid4().hex[:8]}"
 
-                        sender_name, external_sender_id = parseaddr(msg.get("From", ""))
+                        # 💥 应用头部解码器：解决发件人名字 (周乐田) 变成 =?GBK?B?... 乱码的问题
+                        raw_from = msg.get("From", "")
+                        raw_sender_name, external_sender_id = parseaddr(raw_from)
+                        sender_name = self._decode_mail_header(raw_sender_name)
+
                         if not sender_name:
                             sender_name = external_sender_id
 
@@ -134,7 +153,6 @@ class EmailFetcher(BaseFetcher):
                             "source_folder": folder
                         })
 
-                        # 💥 物理级光速核销已读状态
                         if folder == "INBOX" and not is_from_me:
                             await client.store(e_id.decode('utf-8'), '+FLAGS', '\\Seen')
                             print(f"✨ [物理打标] 已读核销成功 ➔ {subject_text[:20]}...")
@@ -148,7 +166,6 @@ class EmailFetcher(BaseFetcher):
         return messages
 
     async def mark_as_processed(self, account_msg_id: str, folder: str = "INBOX"):
-        """向下兼容的冗余层打标器"""
         try:
             client = aioimaplib.IMAP4_SSL(host=self.host)
             await client.wait_hello_from_server()
@@ -168,31 +185,48 @@ class EmailFetcher(BaseFetcher):
         except Exception:
             pass
 
+    # ==========================================
+    # 💥 核心修复二：动态 Charset 嗅探与正文提取
+    # ==========================================
     def _extract_body(self, msg: Message) -> str:
         body_html = ""
         body_plain = ""
+
+        # 内部封装一个带动态编码识别的解码器
+        def decode_payload(part) -> str:
+            raw_payload = part.get_payload(decode=True)
+            if not raw_payload:
+                return ""
+
+            # 关键：让邮件自己告诉你它是哪种字符集
+            charset = part.get_content_charset() or 'utf-8'
+
+            # 填平天坑：把狭隘的 gb2312 强制提升为宽容的 gbk
+            if charset.lower() == 'gb2312':
+                charset = 'gbk'
+
+            try:
+                return raw_payload.decode(charset, errors='ignore')
+            except LookupError:
+                return raw_payload.decode('utf-8', errors='ignore')
 
         if msg.is_multipart():
             for part in msg.walk():
                 content_type = part.get_content_type()
                 if content_type == "text/html":
-                    body_html = part.get_payload(decode=True).decode(errors="ignore")
+                    body_html = decode_payload(part)
                 elif content_type == "text/plain":
-                    body_plain = part.get_payload(decode=True).decode(errors="ignore")
+                    body_plain = decode_payload(part)
         else:
             content_type = msg.get_content_type()
             if content_type == "text/html":
-                body_html = msg.get_payload(decode=True).decode(errors="ignore")
+                body_html = decode_payload(msg)
             elif content_type == "text/plain":
-                body_plain = msg.get_payload(decode=True).decode(errors="ignore")
+                body_plain = decode_payload(msg)
 
         return body_html if body_html else body_plain
 
     def _clean_subject(self, raw_subject: str) -> str:
-        decoded_subject = ""
-        for part, encoding in decode_header(raw_subject):
-            if isinstance(part, bytes):
-                decoded_subject += part.decode(encoding or "utf-8", errors="ignore")
-            else:
-                decoded_subject += part
+        # 💥 应用头部解码器：彻底解决主题乱码
+        decoded_subject = self._decode_mail_header(raw_subject)
         return re.sub(r'(?i)^(re|fwd|fw|回复|转发)\s*:\s*', '', decoded_subject).strip()

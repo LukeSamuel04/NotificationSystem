@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.account import FetchAccount
 from app.models.notifications import Notification
-from app.models.im_session import IMSessionState  # 💥 新增导入：引入 IM 聚合会话模型
+from app.models.im_session import IMSessionState  # 引入 IM 聚合会话模型
 from app.schemas.notification import InstagramWebhookPayload
 
 logger = logging.getLogger(__name__)
@@ -14,28 +14,28 @@ async def process_instagram_webhook(
         db: Session,
         payload: InstagramWebhookPayload,
         is_from_me: bool = False
-):
+) -> bool:
     """
     全量重构版：修正 external_sender_id 逻辑，并实现完整的“全局会话唤醒”闭环
     """
     # 1. 过滤空数据
     if not payload.entry or not payload.entry[0].messaging:
-        return
+        return False
 
     meta_id = payload.entry[0].id  # 商业号本身的平台 ID
     messaging_event = payload.entry[0].messaging[0]
 
     # 2. 过滤非文字消息
     if not messaging_event.message or not messaging_event.message.text:
-        return
+        return False
 
     message_data = messaging_event.message
-    sender_id = messaging_event.sender.id      # 发送者 ID
+    sender_id = messaging_event.sender.id  # 发送者 ID
     recipient_id = messaging_event.recipient.id  # 接收者 ID
     raw_text = message_data.text
     msg_id = message_data.mid
 
-    # 💥 核心修正逻辑：确定“对话伙伴”的 ID
+    # 核心修正逻辑：确定“对话伙伴”的 ID
     # 无论谁发的消息，我们要记录的是这封信“跟谁聊”
     if is_from_me:
         # 如果是我发的（Echo），那么对方是接收者
@@ -61,7 +61,12 @@ async def process_instagram_webhook(
 
         if not target_account:
             logger.warning(f"⚠️ 未绑定的 Meta ID: {meta_id}，消息已丢弃。")
-            return
+            return False
+
+        # 🚀 💥 新增硬门禁：拦截未激活账号
+        if not target_account.is_active:
+            logger.info(f"🚫 账号 (Meta ID: {meta_id}) 已设为不激活，直接丢弃收到的 Instagram 消息。")
+            return False
 
         # 6. 写入新消息到数据库
         new_notification = Notification(
@@ -101,6 +106,9 @@ async def process_instagram_webhook(
         status_label = "我方回声" if is_from_me else "对方来信"
         logger.info(f"✅ [{status_label}] 消息入库成功并完成会话唤醒 (Partner: {chat_partner_id})")
 
+        return True
+
     except Exception as e:
         db.rollback()
         logger.error(f"❌ 消息入库失败: {e}")
+        return False

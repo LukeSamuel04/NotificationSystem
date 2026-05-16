@@ -58,7 +58,7 @@ async def tester_loop(stop_event: asyncio.Event):
                     # 💥 架构升级：在外层根据平台动态组装探针实例
                     if acc.platform == "email":
                         # 兼容由于 Schema 升级被提取到外层的 username
-                        test_config = {**acc.config, "user": acc.username}
+                        test_config = {**acc.config, "user": acc.platform_account_id}
                         tester = EmailFetcher(test_config)
                         await check_single_account(acc, tester, db)
 
@@ -105,9 +105,10 @@ async def check_single_account(acc: FetchAccount, tester_instance, db: Session):
             logger.warning(f"⚠️ 账号 [{acc.platform}] {acc.username} 验证失败 ({FAIL_COUNTS[acc.id]}/3)")
 
             # 连续 3 次失败判定为失效
-            if FAIL_COUNTS[acc.id] >= 3 and acc.is_valid:
+            if FAIL_COUNTS[acc.id] >= 3:
                 acc.is_valid = False
                 logger.error(f"🚫 账号 [{acc.platform}] {acc.username} 确认失联，标记为失效。")
+                acc.is_active = False
 
     except Exception as e:
         logger.error(f"执行账号 {acc.username} 检查时发生异常: {e}")

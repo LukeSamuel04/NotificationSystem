@@ -29,7 +29,8 @@ async def process_pending_im_sessions(db: Session) -> int:
         Notification.account_id,
         Notification.platform
     ).filter(
-        Notification.status == "pending"
+        Notification.status == "pending",
+        Notification.platform == "instagram"
     ).distinct().all()
 
     if not pending_sessions:

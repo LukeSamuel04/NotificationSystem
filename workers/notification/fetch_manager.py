@@ -77,7 +77,7 @@ async def fetch_messages_for_account(account: FetchAccount) -> list[dict]:
         account_config = getattr(account, 'config', {}) or {}
         config = {
             "host": account_config.get("host"),
-            "user": account.username,
+            "user": account.platform_account_id,
             "password": account_config.get("password")
         }
         try:
