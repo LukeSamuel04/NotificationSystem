@@ -1,9 +1,15 @@
 # app/services/instagram/availability_tester.py
+# app/services/instagram/availability_tester.py
 import httpx
 import logging
 import asyncio
+import os
+from dotenv import load_dotenv, find_dotenv
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("InstagramProbe")
+
+# 💥 规范：在文件加载时，优先把本地环境中的配置变量加载进来
+load_dotenv(find_dotenv(), override=True)
 
 
 class InstagramAvailabilityTester:
@@ -15,7 +21,7 @@ class InstagramAvailabilityTester:
         """
         self.meta_id = meta_id
         self.token = access_token
-        # 建议使用 v19.0 或更新的稳定版本
+        # 保持使用 Meta Graph API 的稳定演进版本
         self.base_url = "https://graph.facebook.com/v25.0"
 
     async def test_connection(self) -> bool:
@@ -23,7 +29,7 @@ class InstagramAvailabilityTester:
         核心探针逻辑：拿着 Token 去 Meta 家敲门，测试有效性
         """
         if not self.token or not self.meta_id:
-            logger.error("❌ Instagram 探针失败: 缺少 meta_id 或 access_token")
+            logger.error("❌ Instagram 探针验证失败: 缺少依赖的 meta_id 或 access_token")
             return False
 
         try:
@@ -57,24 +63,32 @@ class InstagramAvailabilityTester:
 
 
 # ==========================================
-# 🚀 独立测试模块 (方便你直接跑通)
+# 🚀 独立本地快速验证验证模块 (已彻底消除硬编码)
 # ==========================================
 if __name__ == "__main__":
     # 配置基础的日志输出格式，方便在控制台查看
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 
-    async def run_test():
-        print("--- 开始测试 Instagram 探针 ---")
+    async def run_local_debug():
+        print("\n--- ⏳ 开始执行 Instagram 探针本地安全调试 ---")
 
-        # TODO: 把这里的测试数据换成你真实的 Meta ID 和 Token
-        TEST_META_ID = "17841479965622632"
-        TEST_TOKEN = "EAAU2w0HcsFkBRdrHe6ZBRYO6MhlW7CzCzwgIZApFHux1O54GwzpYUCY7A758nNfUK8qSnQz3tijx6qo4Fjdr60rcSLd4DUQHZAsZCmGPBGsyZA2uzrf5xfRoYHT8l7PxyPT3g3vrNp3ZCQzeUIkYymjWg4lNsCFDaHptgRNEeGBUAmY9epJQ77ZAN7ZCytNxAYhZAD2bRvBmtZCS7ZBLis103ZA0ZBZCccZB21KmkOUB63VFrIATkGf"
-        tester = InstagramAvailabilityTester(meta_id=TEST_META_ID, access_token=TEST_TOKEN)
+        # 💥 重构精髓：从 .env 文件中动态读取测试凭证，绝不将真实 Token 遗留在代码树中
+        test_meta_id = os.getenv("Test_meta_id")
+        test_token = os.getenv("Public_page_token_new")
+
+        if not test_meta_id or not test_token:
+            logger.error(
+                "❌ 调试终止：未在本地 .env 文件中检测到 'DEBUG_INSTAGRAM_META_ID' 或 'DEBUG_INSTAGRAM_TOKEN'。\n"
+                "👉 请在项目根目录的 .env 中补齐配置后再点击一键运行。"
+            )
+            return
+
+        tester = InstagramAvailabilityTester(meta_id=test_meta_id, access_token=test_token)
         result = await tester.test_connection()
 
-        print(f"--- 测试结果: {'通过 (True)' if result else '失败 (False)'} ---")
+        print(f"--- 🏁 调试结束: 探针反馈状态 ➔ {'通过 (True)' if result else '失败 (False)'} ---\n")
 
 
-    # 运行测试
-    asyncio.run(run_test())
+    # 启动调试异步引擎
+    asyncio.run(run_local_debug())

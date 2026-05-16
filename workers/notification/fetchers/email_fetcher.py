@@ -1,4 +1,4 @@
-# workers/notification/fetchers/email_fetcher.py
+# tests/tests_after_developing/7_availability_tester_manager.py
 import email
 import re
 import uuid
@@ -38,7 +38,7 @@ class EmailFetcher(BaseFetcher):
 
             if response.result == 'OK':
                 print(f"✅ 邮箱验证通过: {self.user}")
-                await client.logout()
+                # 💥 核心净化：移除了多余的独立 logout 调用，交给下面的 finally 统一闭环释放，防止二次注销
                 return True
             else:
                 # 专门拦截 163 等返回 NO 但不抛出异常的情况

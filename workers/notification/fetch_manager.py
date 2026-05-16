@@ -1,4 +1,5 @@
 # workers/notification/fetch_manager.py
+#监测新邮件、例行扫盘，把新消息送进数据引擎
 import logging
 import asyncio
 from datetime import datetime
