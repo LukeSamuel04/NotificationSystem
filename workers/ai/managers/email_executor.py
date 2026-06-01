@@ -59,36 +59,43 @@ async def process_pending_emails(db: Session) -> int:
                 extracted_topic = ai_result.summary[:50] if (
                             hasattr(ai_result, 'summary') and ai_result.summary) else clean_subject
 
-                fusion_result = orchestrator.resolve_priority(
-                    account_id=account_id,
-                    notification_id=latest_msg.id,
-                    external_sender_id=sender_email,
-                    ai_score=ai_result.priority_score,
-                    current_topic=extracted_topic,
-                    platform="email"
-                )
-
-                analysis = db.query(EmailAnalysis).filter_by(notification_id=latest_msg.id).first()
-                if not analysis:
-                    analysis = EmailAnalysis(notification_id=latest_msg.id)
-                    db.add(analysis)
-
-                if hasattr(ai_result, 'category_id'):
-                    analysis.category_id = ai_result.category_id
-                if hasattr(ai_result, 'summary'):
-                    analysis.summary = ai_result.summary
-
-                analysis.priority_score = fusion_result['final_priority']
-
-                db.query(Notification).filter(
+                # 💥 核心修复：找出该 Thread 下所有 pending 的邮件，将 AI 成果“雨露均沾”
+                thread_msgs = db.query(Notification).filter(
                     Notification.subject == subject,
                     Notification.account_id == account_id,
                     Notification.status == "pending",
                     Notification.platform == "email"
-                ).update({"status": "processed"})
+                ).all()
+
+                for msg in thread_msgs:
+                    # 1. 每个人都分配一个独立的融合打分（完美解决孤儿 0分 问题）
+                    fusion_result = orchestrator.resolve_priority(
+                        account_id=account_id,
+                        notification_id=msg.id,
+                        external_sender_id=sender_email,
+                        ai_score=ai_result.priority_score,
+                        current_topic=extracted_topic,
+                        platform="email"
+                    )
+
+                    # 2. 为当前邮件 Upsert EmailAnalysis
+                    analysis = db.query(EmailAnalysis).filter_by(notification_id=msg.id).first()
+                    if not analysis:
+                        analysis = EmailAnalysis(notification_id=msg.id)
+                        db.add(analysis)
+
+                    if hasattr(ai_result, 'category_id'):
+                        analysis.category_id = ai_result.category_id
+                    if hasattr(ai_result, 'summary'):
+                        analysis.summary = ai_result.summary
+
+                    analysis.priority_score = fusion_result['final_priority']
+
+                    # 3. 逐个精准标记为 processed
+                    msg.status = "processed"
 
                 processed_threads_count += 1
-                logger.debug(f"✅ 邮件 Thread [{clean_subject}] 已成功闭环修约。")
+                logger.debug(f"✅ 邮件 Thread [{clean_subject}] 已成功闭环修约，共赋能 {len(thread_msgs)} 封历史邮件。")
             else:
                 logger.warning(f"⚠️ AI 响应无法提取有效特征，邮件 Thread [{clean_subject}] 暂不闭环。")
 

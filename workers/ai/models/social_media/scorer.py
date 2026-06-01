@@ -1,4 +1,6 @@
 # workers/ai/models/social_media/scorer.py
+from utils.proxy_helper import inject_local_proxy
+inject_local_proxy()
 import os
 import logging
 from typing import Optional

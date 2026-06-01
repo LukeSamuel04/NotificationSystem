@@ -60,7 +60,7 @@ class PriorityOrchestrator:
         final_score = max(1, min(10, final_score))
 
         # ---------------------------------------------------------
-        # 5. 💥 冷数据持久化：为深度学习准备“特征快照”
+        # 5. 💥 冷数据持久化：为深度学习准备“特征快照” (引入 Upsert 防御 SAWarning)
         # ---------------------------------------------------------
         analysis_snapshot = {
             "algorithm_version": "v1.1-sqrt-smooth",
@@ -79,14 +79,25 @@ class PriorityOrchestrator:
             }
         }
 
-        new_payload = AnalysisPayload(
-            notification_id=notification_id,
-            account_id=account_id,
-            platform=platform,
-            analysis_data=analysis_snapshot,
-            user_feedback_score=None  # 预留给前端用户反馈的占位符
-        )
-        self.db.add(new_payload)
+        # 先查询是否已经存在脏数据残留
+        existing_payload = self.db.query(AnalysisPayload).filter_by(
+            notification_id=notification_id
+        ).first()
+
+        if existing_payload:
+            # 如果存在，覆写更新
+            existing_payload.analysis_data = analysis_snapshot
+            existing_payload.platform = platform
+        else:
+            # 如果不存在，安全插入
+            new_payload = AnalysisPayload(
+                notification_id=notification_id,
+                account_id=account_id,
+                platform=platform,
+                analysis_data=analysis_snapshot,
+                user_feedback_score=None  # 预留给前端用户反馈的占位符
+            )
+            self.db.add(new_payload)
 
         # ---------------------------------------------------------
         # 6. 热数据持久化：更新 Session 状态表，供前端即时排序

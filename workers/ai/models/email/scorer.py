@@ -1,11 +1,12 @@
 # workers/ai/models/email/scorer.py
+from utils.proxy_helper import inject_local_proxy
+inject_local_proxy()
 import os
 import logging
 from typing import Optional
 from pydantic import BaseModel, ValidationError
 from openai import AsyncOpenAI
 from dotenv import load_dotenv, find_dotenv
-
 logger = logging.getLogger("EmailScorer")
 load_dotenv(find_dotenv(), override=True)
 

@@ -1,5 +1,7 @@
 # app/services/instagram/availability_tester.py
 # app/services/instagram/availability_tester.py
+from utils.proxy_helper import inject_local_proxy
+inject_local_proxy()
 import httpx
 import logging
 import asyncio
@@ -33,7 +35,7 @@ class InstagramAvailabilityTester:
             return False
 
         try:
-            async with httpx.AsyncClient(timeout=10.0,trust_env=False) as client:
+            async with httpx.AsyncClient(timeout=10.0) as client:
                 # 访问该账号的 Graph API 节点，请求最基础的 id 字段来验证 Token
                 url = f"{self.base_url}/{self.meta_id}"
                 response = await client.get(

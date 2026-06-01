@@ -1,5 +1,6 @@
 # workers/notification/fetchers/email_fetcher.py
 import email
+import asyncio
 import re
 import uuid
 from email.header import decode_header
@@ -157,6 +158,7 @@ class EmailFetcher(BaseFetcher):
                             await client.store(e_id.decode('utf-8'), '+FLAGS', '\\Seen')
                             print(f"✨ [物理打标] 已读核销成功 ➔ {subject_text[:20]}...")
 
+            await asyncio.sleep(0.1)
             await client.close()
             await client.logout()
 
