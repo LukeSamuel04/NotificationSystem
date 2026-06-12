@@ -52,6 +52,8 @@ class TestEmailExecutor(unittest.IsolatedAsyncioTestCase):
             # 路由 C：获取最新邮件 或 更新状态
             elif args[0] is Notification:
                 mock_q.filter.return_value.order_by.return_value.first.return_value = self.mock_latest_msg
+                # 💥 核心修复：支持新版架构的 thread_msgs 批量遍历，使得 db.add() 能够被正常调用
+                mock_q.filter.return_value.all.return_value = [self.mock_latest_msg]
             # 路由 D：查询是否已存在 EmailAnalysis 分析记录
             elif args[0] is EmailAnalysis:
                 mock_q.filter_by.return_value.first.return_value = None  # 返回 None 触发新建
